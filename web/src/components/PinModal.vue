@@ -62,7 +62,7 @@ const onSubmit = () => {
           :class="{ active: verdict === 0 }"
           @click="verdict = 0"
         >
-          <span class="verdict-icon">😐</span>
+          <span class="verdict-icon">🫤</span>
           <span class="verdict-label">Meh</span>
         </button>
         <button
@@ -71,7 +71,7 @@ const onSubmit = () => {
           :class="{ active: verdict === -1 }"
           @click="verdict = -1"
         >
-          <span class="verdict-icon">🤢</span>
+          <span class="verdict-icon">💩</span>
           <span class="verdict-label">Yuck</span>
         </button>
       </div>

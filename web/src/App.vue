@@ -17,8 +17,8 @@ type Pin = {
 
 const VERDICT_META: Record<Verdict, { cls: "yum" | "meh" | "yuck"; icon: string }> = {
   1: { cls: "yum", icon: "😋" },
-  0: { cls: "meh", icon: "😐" },
-  [-1]: { cls: "yuck", icon: "🤢" },
+  0: { cls: "meh", icon: "🫤" },
+  [-1]: { cls: "yuck", icon: "💩" },
 };
 
 type Pending = { lat: number; lng: number };
@@ -31,35 +31,50 @@ const pendingPin = ref<Pending | null>(null);
 let map: MLMap | null = null;
 const pinMarkers = new Map<number, { emoji: Marker; text: Marker }>();
 
-// Deterministic rotation from pin id so labels don't jiggle on refresh.
-const seededRotation = (id: number) => {
-  const s = Math.sin(id * 9301.7 + 49297.3) * 43758.5453;
-  const r = s - Math.floor(s); // 0..1
-  return (r - 0.5) * 12; // -6° .. +6°
+// Deterministic pseudo-random in [0, 1) seeded on pin id + salt.
+const seededUnit = (id: number, salt: number) => {
+  const s = Math.sin(id * 9301.7 + salt) * 43758.5453;
+  return s - Math.floor(s);
 };
+const seededRotation = (id: number) => (seededUnit(id, 49297.3) - 0.5) * 12; // -6° .. +6°
+const seededYumDelay = (id: number) => seededUnit(id, 71723.5) * 7; // 0..7s (matches animation duration)
 
 const renderPin = (pin: Pin) => {
   if (!map || pinMarkers.has(pin.id)) return;
   const { cls, icon } = VERDICT_META[pin.verdict];
 
-  // 1) Small circular emoji badge sits at the exact coordinate.
-  const emojiEl = document.createElement("div");
-  emojiEl.className = `pin-emoji ${cls}`;
-  emojiEl.textContent = icon;
-  emojiEl.addEventListener("click", (e) => e.stopPropagation());
-  const emojiMarker = new Marker({ element: emojiEl, anchor: "center" })
+  // 1) Emoji at the exact coordinate. Outer div is what MapLibre positions;
+  // inner div carries any animation transform so MapLibre's transform on the
+  // outer doesn't clobber it.
+  const emojiOuter = document.createElement("div");
+  const emojiInner = document.createElement("div");
+  emojiInner.className = `pin-emoji ${cls}`;
+  emojiInner.textContent = icon;
+  if (cls === "yum") {
+    emojiInner.style.animationDelay = `${seededYumDelay(pin.id).toFixed(2)}s`;
+  }
+  emojiOuter.appendChild(emojiInner);
+  emojiOuter.addEventListener("click", (e) => e.stopPropagation());
+  const emojiMarker = new Marker({ element: emojiOuter, anchor: "center" })
     .setLngLat([pin.lng, pin.lat])
     .addTo(map);
 
   // 2) Text lives beside it — bigger, rotated, no background.
-  // Outer div is what MapLibre positions; inner div carries the rotation
-  // so MapLibre's own transform doesn't clobber ours.
+  // Three levels: outer (MapLibre positions it), rotation wrapper (seeded
+  // tilt), inner text (carries the yum wiggle animation for yums).
+  // Separating the transforms so the tilt and animation don't overwrite
+  // each other.
   const textOuter = document.createElement("div");
+  const textRot = document.createElement("div");
+  textRot.style.transform = `rotate(${seededRotation(pin.id).toFixed(2)}deg)`;
   const textInner = document.createElement("div");
   textInner.className = `pin-text ${cls}`;
-  textInner.style.transform = `rotate(${seededRotation(pin.id).toFixed(2)}deg)`;
   textInner.textContent = pin.tag;
-  textOuter.appendChild(textInner);
+  if (cls === "yum") {
+    textInner.style.animationDelay = `${seededYumDelay(pin.id).toFixed(2)}s`;
+  }
+  textRot.appendChild(textInner);
+  textOuter.appendChild(textRot);
   textOuter.addEventListener("click", (e) => e.stopPropagation());
   const textMarker = new Marker({ element: textOuter, anchor: "top", offset: [0, 18] })
     .setLngLat([pin.lng, pin.lat])
