@@ -1,0 +1,11 @@
+{
+  "name": "grubmaps",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run scripts/dev.ts",
+    "dev:api": "cd server && bun run dev",
+    "dev:web": "cd web && bun run dev",
+    "seed:places": "bun run scripts/seed-places.ts"
+  }
+}
