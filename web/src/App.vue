@@ -100,6 +100,10 @@ const renderPin = (pin: Pin) => {
     e.stopPropagation();
     openPopover(pin.id);
   });
+  if (HAS_HOVER) {
+    emojiOuter.addEventListener("mouseenter", () => scheduleOpen(pin.id));
+    emojiOuter.addEventListener("mouseleave", scheduleClose);
+  }
   const emojiMarker = new Marker({ element: emojiOuter, anchor: "center" })
     .setLngLat([pin.lng, pin.lat])
     .addTo(map);
@@ -121,6 +125,10 @@ const renderPin = (pin: Pin) => {
     e.stopPropagation();
     openPopover(pin.id);
   });
+  if (HAS_HOVER) {
+    textOuter.addEventListener("mouseenter", () => scheduleOpen(pin.id));
+    textOuter.addEventListener("mouseleave", scheduleClose);
+  }
   const textMarker = new Marker({ element: textOuter, anchor: "top", offset: [0, 18] })
     .setLngLat([pin.lng, pin.lat])
     .addTo(map);
@@ -128,11 +136,72 @@ const renderPin = (pin: Pin) => {
   pinMarkers.set(pin.id, { emoji: emojiMarker, text: textMarker });
 };
 
-const closePopover = () => {
-  if (activePopover) {
-    activePopover.marker.remove();
-    activePopover = null;
+const HAS_HOVER = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+let openTimer: number | null = null;
+let closeTimer: number | null = null;
+let closeAnimTimer: number | null = null;
+const CLOSE_ANIM_MS = 220;
+
+const cancelOpen = () => {
+  if (openTimer !== null) {
+    window.clearTimeout(openTimer);
+    openTimer = null;
   }
+};
+const cancelClose = () => {
+  if (closeTimer !== null) {
+    window.clearTimeout(closeTimer);
+    closeTimer = null;
+  }
+};
+const cancelCloseAnim = () => {
+  if (closeAnimTimer !== null) {
+    window.clearTimeout(closeAnimTimer);
+    closeAnimTimer = null;
+  }
+};
+
+// FB-style timings. Open delay filters accidental fly-bys; close delay
+// gives the cursor time to travel from pin to fan buttons. When the fan
+// is already up on another pin, hopping to a new one snaps instantly.
+const scheduleOpen = (pinId: number) => {
+  cancelClose();
+  if (activePopover && activePopover.pinId !== pinId) {
+    cancelOpen();
+    openPopover(pinId);
+    return;
+  }
+  cancelOpen();
+  openTimer = window.setTimeout(() => {
+    openTimer = null;
+    openPopover(pinId);
+  }, 450);
+};
+const scheduleClose = () => {
+  cancelOpen();
+  cancelClose();
+  closeTimer = window.setTimeout(() => {
+    closeTimer = null;
+    closePopover();
+  }, 300);
+};
+
+const closePopover = () => {
+  cancelOpen();
+  cancelClose();
+  if (!activePopover) return;
+  // Play the close animation, then remove the marker. Keep activePopover
+  // alive during the animation so a mid-close re-hover can cancel it.
+  const marker = activePopover.marker;
+  const pinId = activePopover.pinId;
+  marker.getElement().classList.add("closing");
+  cancelCloseAnim();
+  closeAnimTimer = window.setTimeout(() => {
+    closeAnimTimer = null;
+    marker.remove();
+    if (activePopover && activePopover.pinId === pinId) activePopover = null;
+  }, CLOSE_ANIM_MS);
 };
 
 // Angular position of each button in the fan, measured clockwise from
@@ -148,7 +217,6 @@ const buildPopoverEl = (pin: Pin): HTMLElement => {
     if (currentMyReaction(pin.id) === r.kind) btn.classList.add("reacted");
     btn.title = r.label;
     btn.style.setProperty("--angle", FAN_ANGLES[i]);
-    btn.style.animationDelay = `${i * 70}ms`;
     const emojiSpan = document.createElement("span");
     emojiSpan.className = "reaction-emoji";
     emojiSpan.textContent = r.emoji;
@@ -164,6 +232,10 @@ const buildPopoverEl = (pin: Pin): HTMLElement => {
     el.appendChild(btn);
   });
   el.addEventListener("click", (ev) => ev.stopPropagation());
+  if (HAS_HOVER) {
+    el.addEventListener("mouseenter", cancelClose);
+    el.addEventListener("mouseleave", scheduleClose);
+  }
   return el;
 };
 
@@ -171,8 +243,25 @@ const openPopover = (pinId: number) => {
   if (!map) return;
   const pin = pinsById.get(pinId);
   if (!pin) return;
-  if (activePopover?.pinId === pinId) return; // already open on this pin
-  closePopover();
+
+  // Same pin: if a close animation is running, cancel it and pop back out.
+  if (activePopover?.pinId === pinId) {
+    const el = activePopover.marker.getElement();
+    if (el.classList.contains("closing")) {
+      el.classList.remove("closing");
+      cancelCloseAnim();
+    }
+    return;
+  }
+
+  // Different pin: if the previous is mid-close, drop it instantly (no
+  // point animating something the user is moving away from).
+  if (activePopover) {
+    cancelCloseAnim();
+    activePopover.marker.remove();
+    activePopover = null;
+  }
+
   const el = buildPopoverEl(pin);
   const marker = new Marker({ element: el, anchor: "center", offset: [0, 0] })
     .setLngLat([pin.lng, pin.lat])
