@@ -24,20 +24,41 @@ html, body, #app {
   touch-action: manipulation;
 }
 
-.header {
+.logo {
   position: absolute;
-  top: calc(12px + var(--safe-top));
-  left: calc(12px + var(--safe-left));
+  top: calc(10px + var(--safe-top));
+  left: calc(10px + var(--safe-left));
   z-index: 5;
-  background: rgba(255, 255, 255, 0.94);
-  padding: 8px 14px;
-  border-radius: 999px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
-  color: #111;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 6px;
+  text-decoration: none;
   user-select: none;
-  font-size: 14px;
+  overflow: visible;
+  -webkit-tap-highlight-color: transparent;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.28));
+  transition: transform 0.15s ease-out;
+}
+.logo:active { transform: scale(0.97); }
+
+.logo-pin { display: block; }
+
+.logo-word {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 26px;
+  font-weight: 900;
+  letter-spacing: -0.6px;
+  line-height: 1.15;
+  padding-bottom: 2px;
+  white-space: nowrap;
+}
+.logo-word .grub { color: #22863a; }
+.logo-word .maps { color: #d97706; }
+
+@media (max-width: 640px) {
+  .logo-word { font-size: 22px; }
+  .logo-pin { width: 28px; height: 32px; }
 }
 
 .hint {
@@ -96,6 +117,108 @@ html, body, #app {
 }
 @media (prefers-reduced-motion: reduce) {
   .pin-emoji.yum { animation: none; }
+}
+
+/* Reaction fan — 3 buttons fan out radially from the pin */
+.reaction-fan {
+  position: relative;
+  width: 0;
+  height: 0;
+  /* MapLibre positions this at the pin's coordinate; children fan out from
+     the origin at 0,0. Container itself has no visual footprint. */
+}
+
+.reaction-btn {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border: none;
+  background: #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  color: #333;
+  min-height: 30px;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+  opacity: 0;
+  transform-origin: 50% 50%;
+  /* Composite transform: center → rotate to angle → translate radially →
+     counter-rotate so the pill stays upright. Values are set at 0 (start)
+     and again in the keyframe (end); no shorthand animation on transform
+     alone to avoid clobbering the identity state. */
+  transform:
+    translate(-50%, -50%)
+    rotate(var(--angle, 0deg))
+    translate(0, 0)
+    rotate(calc(-1 * var(--angle, 0deg)))
+    scale(0.5);
+  animation: fan-out 260ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes fan-out {
+  0% {
+    opacity: 0;
+    transform:
+      translate(-50%, -50%)
+      rotate(var(--angle, 0deg))
+      translate(0, 0)
+      rotate(calc(-1 * var(--angle, 0deg)))
+      scale(0.5);
+  }
+  60% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform:
+      translate(-50%, -50%)
+      rotate(var(--angle, 0deg))
+      translate(0, -60px)
+      rotate(calc(-1 * var(--angle, 0deg)))
+      scale(1);
+  }
+}
+
+.reaction-btn:hover { filter: brightness(0.96); }
+.reaction-btn:active { filter: brightness(0.9); }
+.reaction-btn.reacted {
+  background: var(--yum);
+  color: #fff;
+  border-color: var(--yum-dark);
+  box-shadow: 0 4px 12px rgba(46, 164, 79, 0.4);
+}
+
+.reaction-emoji { font-size: 15px; line-height: 1; }
+.reaction-count { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .reaction-btn {
+    animation-duration: 0.001ms;
+    opacity: 1;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .reaction-btn {
+    background: #2c2c2e;
+    color: #f2f2f7;
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+  .reaction-btn.reacted {
+    background: var(--yum);
+    color: #fff;
+    border-color: var(--yum-dark);
+    box-shadow: 0 4px 12px rgba(46, 164, 79, 0.5);
+  }
 }
 
 .pin-text {
