@@ -4,6 +4,7 @@ import { Map as MLMap, Marker, NavigationControl } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import PinModal from "./components/PinModal.vue";
 import Logo from "./components/Logo.vue";
+import SearchBar from "./components/SearchBar.vue";
 
 type Verdict = 1 | 0 | -1;
 type ReactionKind = "legit" | "dispute" | "protip";
@@ -32,7 +33,7 @@ const REACTIONS: readonly { kind: ReactionKind; emoji: string; label: string }[]
   { kind: "protip", emoji: "🧠", label: "pro tip" },
 ];
 
-type Pending = { lat: number; lng: number };
+type Pending = { lat: number; lng: number; placeName?: string };
 
 const MILWAUKEE: [number, number] = [-87.9065, 43.0389];
 
@@ -44,6 +45,7 @@ const pinMarkers = new Map<number, { emoji: Marker; text: Marker }>();
 const pinsById = new Map<number, Pin>();
 
 let activePopover: { marker: Marker; pinId: number } | null = null;
+let searchMarker: { markers: Marker[]; lat: number; lng: number; name: string } | null = null;
 
 // localStorage-backed set of "pinId:kind" strings I've already reacted with,
 // used to highlight my reactions across sessions. Not authoritative — the
@@ -404,20 +406,92 @@ onMounted(() => {
   canvas.style.cursor = "crosshair";
 
   map.on("click", (e) => {
-    // If a reaction popover is open, this map click is treated as
-    // "dismiss the popover" and does NOT open the drop-pin modal.
+    // Map click cascade: dismiss any transient UI first (popover, search
+    // callout). Only fall through to "drop new pin" on a clean click.
     if (activePopover) {
       closePopover();
+      return;
+    }
+    if (searchMarker) {
+      closeSearchMarker();
       return;
     }
     pendingPin.value = { lat: e.lngLat.lat, lng: e.lngLat.lng };
   });
 });
 
+const closeSearchMarker = () => {
+  if (searchMarker) {
+    for (const m of searchMarker.markers) m.remove();
+    searchMarker = null;
+  }
+};
+
+const openReviewFromSearch = () => {
+  if (!searchMarker) return;
+  const { lat, lng, name } = searchMarker;
+  pendingPin.value = { lat, lng, placeName: name };
+  closeSearchMarker();
+};
+
+const onSearchSelect = ({
+  lat,
+  lng,
+  name,
+}: {
+  lat: number;
+  lng: number;
+  name: string;
+}) => {
+  if (!map) return;
+  map.easeTo({ center: [lng, lat], zoom: 17, duration: 800 });
+  closeSearchMarker();
+
+  // Outer div is what MapLibre positions via transform; inner div carries
+  // our own animation transform. Without this split, the animation's
+  // `transform: scale(...)` clobbers MapLibre's `translate3d` and the pill
+  // ends up glued to the map container's top-left instead of the coord.
+  const outer = document.createElement("div");
+  outer.addEventListener("click", (e) => e.stopPropagation());
+
+  const inner = document.createElement("div");
+  inner.className = "search-target";
+
+  const cta = document.createElement("button");
+  cta.type = "button";
+  cta.className = "search-target-cta";
+  cta.textContent = "Rate this spot?";
+  cta.setAttribute("title", name);
+  cta.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openReviewFromSearch();
+  });
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "search-target-close";
+  close.setAttribute("aria-label", "Cancel");
+  close.textContent = "✕";
+  close.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeSearchMarker();
+  });
+
+  inner.appendChild(cta);
+  inner.appendChild(close);
+  outer.appendChild(inner);
+  const wrapMarker = new Marker({ element: outer, anchor: "center" })
+    .setLngLat([lng, lat])
+    .addTo(map);
+
+  searchMarker = { markers: [wrapMarker], lat, lng, name };
+};
+
 const onKeydown = (e: KeyboardEvent) => {
   if (e.key !== "Escape") return;
   if (pendingPin.value) pendingPin.value = null;
   else if (activePopover) closePopover();
+  else if (searchMarker) closeSearchMarker();
 };
 watch(pendingPin, (v) => {
   if (v) closePopover();
@@ -427,6 +501,7 @@ onMounted(() => window.addEventListener("keydown", onKeydown));
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
   closePopover();
+  closeSearchMarker();
   for (const { emoji, text } of pinMarkers.values()) {
     emoji.remove();
     text.remove();
@@ -440,12 +515,14 @@ onBeforeUnmount(() => {
 
 <template>
   <Logo />
+  <SearchBar @select="onSearchSelect" />
   <div class="hint">Tap the map · brutally honest, 8 words max</div>
   <div ref="mapEl" style="width: 100%; height: 100%"></div>
   <PinModal
     v-if="pendingPin"
     :lat="pendingPin.lat"
     :lng="pendingPin.lng"
+    :place-name="pendingPin.placeName"
     @cancel="pendingPin = null"
     @submit="submitPin"
   />

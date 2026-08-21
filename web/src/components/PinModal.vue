@@ -3,7 +3,7 @@ import { computed, ref } from "vue";
 
 type Verdict = 1 | 0 | -1;
 
-const props = defineProps<{ lat: number; lng: number }>();
+const props = defineProps<{ lat: number; lng: number; placeName?: string }>();
 const emit = defineEmits<{
   cancel: [];
   submit: [payload: { tag: string; verdict: Verdict }];
@@ -43,8 +43,11 @@ const onSubmit = () => {
 <template>
   <div class="modal-backdrop" @click.self="emit('cancel')">
     <div class="modal">
-      <h2>What's the verdict?</h2>
-      <div class="coords">{{ props.lat.toFixed(4) }}, {{ props.lng.toFixed(4) }}</div>
+      <h2>{{ props.placeName ?? "What's the verdict?" }}</h2>
+      <div class="coords">
+        <template v-if="props.placeName">Your take?</template>
+        <template v-else>{{ props.lat.toFixed(4) }}, {{ props.lng.toFixed(4) }}</template>
+      </div>
 
       <div class="verdict-picker">
         <button
