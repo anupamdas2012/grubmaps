@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "bun run scripts/dev.ts",
     "dev:api": "cd server && bun run dev",
-    "dev:web": "cd web && bun run dev"
+    "dev:web": "cd web && bun run dev",
+    "gen:emojis": "bun run scripts/gen-emojis.ts"
   }
 }

@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import type { Interest, Verdict } from "../types";
 
-type Verdict = 1 | 0 | -1;
+const props = defineProps<{
+  lat: number;
+  lng: number;
+  placeName?: string;
+  interests: Interest[];
+  defaultInterest: string;
+}>();
 
-const props = defineProps<{ lat: number; lng: number; placeName?: string }>();
 const emit = defineEmits<{
   cancel: [];
-  submit: [payload: { tag: string; verdict: Verdict }];
+  submit: [payload: { tag: string; verdict: Verdict; interest_id: string }];
 }>();
 
 const MIN_WORDS = 1;
@@ -15,6 +21,7 @@ const MAX_CHARS = 60;
 
 const tag = ref("");
 const verdict = ref<Verdict | null>(null);
+const interestId = ref<string>(props.defaultInterest);
 const submitting = ref(false);
 
 const trimmed = computed(() => tag.value.trim());
@@ -24,7 +31,11 @@ const words = computed(() =>
 const wordCountOk = computed(() => words.value >= MIN_WORDS && words.value <= MAX_WORDS);
 const charCountOk = computed(() => trimmed.value.length <= MAX_CHARS);
 const canSubmit = computed(
-  () => wordCountOk.value && charCountOk.value && verdict.value !== null,
+  () =>
+    wordCountOk.value &&
+    charCountOk.value &&
+    verdict.value !== null &&
+    interestId.value.length > 0,
 );
 
 const counterClass = computed(() => {
@@ -36,19 +47,40 @@ const counterClass = computed(() => {
 const onSubmit = () => {
   if (!canSubmit.value || submitting.value || verdict.value === null) return;
   submitting.value = true;
-  emit("submit", { tag: trimmed.value, verdict: verdict.value });
+  emit("submit", {
+    tag: trimmed.value,
+    verdict: verdict.value,
+    interest_id: interestId.value,
+  });
 };
 </script>
 
 <template>
   <div class="modal-backdrop" @click.self="emit('cancel')">
-    <div class="modal">
-      <h2>{{ props.placeName ?? "What's the verdict?" }}</h2>
-      <div class="coords">
-        <template v-if="props.placeName">Your take?</template>
-        <template v-else>{{ props.lat.toFixed(4) }}, {{ props.lng.toFixed(4) }}</template>
+    <div class="menu-card menu-card--modal">
+      <div class="menu-card-eyebrow">a new entry for</div>
+      <h2 class="menu-card-title">
+        {{ props.placeName ?? "your tour" }}
+      </h2>
+      <div class="menu-card-rule"></div>
+
+      <label class="menu-card-label">Category</label>
+      <div class="interest-picker">
+        <button
+          v-for="i in props.interests"
+          :key="i.id"
+          type="button"
+          class="interest-pick"
+          :class="{ active: interestId === i.id }"
+          :style="{ '--chip-accent': i.color }"
+          @click="interestId = i.id"
+        >
+          <span class="interest-chip-emoji">{{ i.emoji }}</span>
+          <span class="interest-chip-name">{{ i.name }}</span>
+        </button>
       </div>
 
+      <label class="menu-card-label">Verdict</label>
       <div class="verdict-picker">
         <button
           type="button"
@@ -79,7 +111,9 @@ const onSubmit = () => {
         </button>
       </div>
 
-      <label for="tag">In {{ MIN_WORDS }}–{{ MAX_WORDS }} words, be brutally specific</label>
+      <label for="tag" class="menu-card-label">
+        Your take · {{ MIN_WORDS }}–{{ MAX_WORDS }} words
+      </label>
       <input
         id="tag"
         v-model="tag"
@@ -90,6 +124,7 @@ const onSubmit = () => {
         autocapitalize="sentences"
         autofocus
         @keydown.enter.prevent="onSubmit"
+        class="menu-input"
       />
       <div class="counter" :class="counterClass">
         {{ words }} / {{ MAX_WORDS }} words
@@ -97,9 +132,15 @@ const onSubmit = () => {
       </div>
 
       <div class="actions">
-        <button class="btn btn-secondary" @click="emit('cancel')">Cancel</button>
-        <button class="btn btn-primary" :disabled="!canSubmit || submitting" @click="onSubmit">
-          {{ submitting ? "Posting…" : "Post it" }}
+        <button class="menu-btn menu-btn--secondary" @click="emit('cancel')">
+          Cancel
+        </button>
+        <button
+          class="menu-btn menu-btn--primary"
+          :disabled="!canSubmit || submitting"
+          @click="onSubmit"
+        >
+          {{ submitting ? "…" : "Post it" }}
         </button>
       </div>
     </div>
