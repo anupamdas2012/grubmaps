@@ -43,10 +43,12 @@ html, body, #app {
   background: var(--menu-bg);
 }
 
-/* ============================ MAP FRAME (contained) ==================== */
+/* ============================ MAP FRAME (contained) ====================
+ * top: 128 (nav bottom 112 + gutter 16), inset 16 all around, border 2px.
+ */
 .map-frame {
   position: absolute;
-  top: calc(124px + var(--safe-top));
+  top: calc(128px + var(--safe-top));
   left: calc(16px + var(--safe-left));
   right: calc(16px + var(--safe-right));
   bottom: calc(16px + var(--safe-bottom));
@@ -61,69 +63,85 @@ html, body, #app {
 
 @media (max-width: 640px) {
   .map-frame {
-    top: calc(114px + var(--safe-top));
-    left: calc(10px + var(--safe-left));
-    right: calc(10px + var(--safe-right));
-    bottom: calc(10px + var(--safe-bottom));
+    top: calc(120px + var(--safe-top));   /* nav bottom 104 + gutter 16 */
+    left: calc(12px + var(--safe-left));
+    right: calc(12px + var(--safe-right));
+    bottom: calc(12px + var(--safe-bottom));
     border-radius: 10px;
   }
 }
 
-/* ============================ SPACING + TYPE SYSTEM ==================== */
-/* 8pt grid. Type scale: 12 / 14 / 15 / 32 / 44. Applied consistently below. */
+/* ============================ 8pt GRID SYSTEM ==========================
+ * Header rows are 48px tall (6 units). Left/right gutter 16px (2 units).
+ * Vertical gutter between rows 16px (2 units). Content is grid-aligned via
+ * flex containers, not scattered absolutes.
+ * -----------------------------------------------------------------------
+ *   TOPBAR:   top 16, height 48         → bottom 64
+ *   NAV:      top 80 (64+16), height 32 → bottom 112
+ *   MAP:      top 128 (112+16), bottom 16
+ */
 
-/* ============================ TOP-LEFT LOGO ============================ */
-.logo {
+/* ============================ TOPBAR (flex row) ======================== */
+.topbar {
   position: absolute;
   top: calc(16px + var(--safe-top));
   left: calc(16px + var(--safe-left));
-  z-index: 7;
+  right: calc(16px + var(--safe-right));
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  height: 48px;
+}
+
+/* Logo is a flex child now — no absolute positioning. Vertical alignment
+   is enforced by the topbar's align-items: center. */
+.logo {
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  height: 48px;
   padding: 0;
   text-decoration: none;
   user-select: none;
-  overflow: visible;
   background: transparent;
   border: none;
   -webkit-tap-highlight-color: transparent;
   transition: transform 0.12s ease-out;
 }
 .logo:active { transform: scale(0.97); }
+
 .logo-word {
   font-family: var(--font-display);
   font-size: 36px;
   font-weight: 400;
   letter-spacing: 1.5px;
-  line-height: 1;
+  line-height: 48px;   /* baseline snaps to topbar row height */
   text-transform: uppercase;
   color: var(--menu-accent);
+  display: inline-block;
 }
 
-@media (max-width: 640px) {
-  .logo { top: calc(14px + var(--safe-top)); left: calc(14px + var(--safe-left)); }
-  .logo-word { font-size: 26px; letter-spacing: 1px; }
-}
-
-/* ============================ TOP SEARCH (wide) ======================== */
-/* Anchored past the logo wordmark; stretches to the right edge. */
+/* Search bar fills the remaining topbar width, matches row height. */
 .search {
-  position: absolute;
-  top: calc(16px + var(--safe-top));
-  left: calc(180px + var(--safe-left));
-  right: calc(16px + var(--safe-right));
-  z-index: 6;
+  flex: 1;
+  min-width: 0;
+  height: 48px;
+  display: flex;
+  align-items: stretch;
 }
 
 .search-input-wrap {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
+  height: 48px;
   background: var(--menu-bg);
   border: none;
   border-radius: 12px;
-  padding: 10px 16px 10px 20px;
+  padding: 0 16px 0 20px;
+  box-sizing: border-box;
   box-shadow:
     0 1px 2px rgba(0, 0, 0, 0.06),
     0 6px 20px rgba(0, 0, 0, 0.08);
@@ -133,6 +151,17 @@ html, body, #app {
   box-shadow:
     0 1px 2px rgba(0, 0, 0, 0.08),
     0 8px 28px rgba(0, 0, 0, 0.14);
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    gap: 16px;
+    height: 40px;
+  }
+  .logo { height: 40px; }
+  .logo-word { font-size: 28px; letter-spacing: 1px; line-height: 40px; }
+  .search { height: 40px; }
+  .search-input-wrap { height: 40px; padding: 0 14px 0 16px; }
 }
 .search-icon { font-size: 14px; line-height: 1; opacity: 0.7; }
 .search-input {
@@ -268,9 +297,10 @@ html, body, #app {
 /* Sits directly below the search pill, spanning the same width. */
 .interest-nav {
   position: absolute;
-  top: calc(84px + var(--safe-top));
-  left: calc(180px + var(--safe-left));
+  top: calc(80px + var(--safe-top));      /* topbar bottom (64) + gutter (16) */
+  left: calc(16px + var(--safe-left));    /* aligns with topbar left gutter */
   right: calc(16px + var(--safe-right));
+  height: 32px;
   z-index: 5;
   display: flex;
   flex-wrap: nowrap;
@@ -352,11 +382,12 @@ html, body, #app {
 
 @media (max-width: 640px) {
   .interest-nav {
-    top: calc(76px + var(--safe-top));
+    top: calc(72px + var(--safe-top));    /* topbar (56) + gutter (16) */
     left: calc(12px + var(--safe-left));
     right: calc(12px + var(--safe-right));
     gap: 2px 14px;
     padding: 6px 14px 6px 4px;
+    height: 32px;
   }
   .ilink { font-size: 13px; padding: 4px 0; }
   .ilink-emoji { font-size: 14px; }

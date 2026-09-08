@@ -107,7 +107,7 @@ onBeforeUnmount(() => {
       <input
         type="text"
         class="search-input"
-        placeholder="find a spot — e.g. discourse coffee"
+        placeholder="what are you craving?"
         v-model="query"
         @input="onInput"
         @focus="onFocus"

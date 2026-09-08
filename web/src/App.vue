@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, computed } from "vue";
-import { Map as MLMap, Marker, NavigationControl } from "maplibre-gl";
+import { Map as MLMap, Marker, NavigationControl, type ExpressionSpecification } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import PinModal from "./components/PinModal.vue";
 import LoginModal from "./components/LoginModal.vue";
@@ -408,6 +408,52 @@ watch(mineOnly, (v) => {
   void loadPins();
 });
 
+// ---- map cleanup pass --------------------------------------------------
+// Non-major road *lines* fade in with zoom: fully hidden below 14, ghost
+// trace at neighborhood zoom, fully drawn by 19 when you're on the block.
+// Non-road labels are dropped entirely; road labels are filtered to majors.
+const MAJOR_ROAD_RE = /motorway|trunk|primary|secondary/i;
+const MINOR_ROAD_OPACITY: ExpressionSpecification = [
+  "interpolate", ["linear"], ["zoom"],
+  14, 0,
+  15, 0.15,
+  17, 0.55,
+  19, 1.0,
+];
+
+const applyStyleCleanup = () => {
+  if (!map) return;
+  const style = map.getStyle();
+  for (const layer of style.layers) {
+    const src = (layer as { "source-layer"?: string })["source-layer"];
+    const id = layer.id.toLowerCase();
+
+    if (layer.type === "symbol") {
+      const isRoadLabel =
+        src === "transportation_name" ||
+        id.includes("road") || id.includes("street") || id.includes("highway");
+      if (isRoadLabel) {
+        map.setFilter(layer.id, [
+          "in",
+          ["get", "class"],
+          ["literal", ["motorway", "trunk", "primary", "secondary"]],
+        ]);
+      } else {
+        map.removeLayer(layer.id);
+      }
+      continue;
+    }
+
+    if (layer.type !== "line") continue;
+    const isRoadLine =
+      src === "transportation" || id.includes("road") || id.includes("bridge") || id.includes("tunnel");
+    if (!isRoadLine) continue;
+    if (MAJOR_ROAD_RE.test(id)) continue;
+
+    map.setPaintProperty(layer.id, "line-opacity", MINOR_ROAD_OPACITY);
+  }
+};
+
 // ---- map init ----------------------------------------------------------
 onMounted(async () => {
   await loadInterests();
@@ -422,26 +468,7 @@ onMounted(async () => {
 
   map.on("load", () => {
     if (!map) return;
-    const style = map.getStyle();
-    for (const layer of style.layers) {
-      if (layer.type !== "symbol") continue;
-      const src = (layer as { "source-layer"?: string })["source-layer"];
-      const id = layer.id.toLowerCase();
-      const isRoadLabel =
-        src === "transportation_name" ||
-        id.includes("road") ||
-        id.includes("street") ||
-        id.includes("highway");
-      if (isRoadLabel) {
-        map.setFilter(layer.id, [
-          "in",
-          ["get", "class"],
-          ["literal", ["motorway", "trunk", "primary", "secondary"]],
-        ]);
-      } else {
-        map.removeLayer(layer.id);
-      }
-    }
+    applyStyleCleanup();
     void loadPins();
   });
 
@@ -483,8 +510,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <Logo />
-  <SearchBar @select="onSearchSelect" />
+  <header class="topbar">
+    <Logo />
+    <SearchBar @select="onSearchSelect" />
+  </header>
   <InterestSwitcher
     v-if="interests.length > 0 && user"
     :interests="interests"
