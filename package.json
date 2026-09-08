@@ -6,6 +6,8 @@
     "dev": "bun run scripts/dev.ts",
     "dev:api": "cd server && bun run dev",
     "dev:web": "cd web && bun run dev",
-    "gen:emojis": "bun run scripts/gen-emojis.ts"
+    "gen:emojis": "bun run scripts/gen-emojis.ts",
+    "icon": "bun run tools/make-icon.ts",
+    "icons:gen": "bun run tools/gen-icons.ts"
   }
 }

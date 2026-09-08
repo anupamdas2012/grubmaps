@@ -48,7 +48,7 @@ html, body, #app {
  */
 .map-frame {
   position: absolute;
-  top: calc(128px + var(--safe-top));
+  top: calc(192px + var(--safe-top));    /* topbar 64 + gutter 16 + nav 96 + gutter 16 */
   left: calc(16px + var(--safe-left));
   right: calc(16px + var(--safe-right));
   bottom: calc(16px + var(--safe-bottom));
@@ -63,7 +63,7 @@ html, body, #app {
 
 @media (max-width: 640px) {
   .map-frame {
-    top: calc(120px + var(--safe-top));   /* nav bottom 104 + gutter 16 */
+    top: calc(170px + var(--safe-top));   /* topbar 56 + gutter 16 + nav 82 + gutter 16 */
     left: calc(12px + var(--safe-left));
     right: calc(12px + var(--safe-right));
     bottom: calc(12px + var(--safe-bottom));
@@ -298,15 +298,15 @@ html, body, #app {
 .interest-nav {
   position: absolute;
   top: calc(80px + var(--safe-top));      /* topbar bottom (64) + gutter (16) */
-  left: calc(16px + var(--safe-left));    /* aligns with topbar left gutter */
+  left: calc(16px + var(--safe-left));
   right: calc(16px + var(--safe-right));
-  height: 32px;
+  height: 96px;                            /* 72 icon + 4 gap + 14 caption + padding */
   z-index: 5;
   display: flex;
   flex-wrap: nowrap;
-  align-items: center;
-  gap: 4px 18px;
-  padding: 6px 20px;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 4px 20px;
   overflow-x: auto;
   scrollbar-width: none;
   mask-image: linear-gradient(to right, black 0, black calc(100% - 24px), transparent 100%);
@@ -319,43 +319,58 @@ html, body, #app {
   position: relative;
   border: none;
   background: transparent;
-  padding: 4px 2px;
+  padding: 4px 6px 6px;
   cursor: pointer;
   font-family: var(--font-heading);
-  font-size: 15px;
+  font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--menu-ink);
   display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
   white-space: nowrap;
   -webkit-tap-highlight-color: transparent;
   transition: color 0.12s, transform 0.05s;
 }
 .ilink:hover { color: var(--menu-accent); }
+.ilink:hover .ilink-img { transform: translateY(-2px) scale(1.05); }
 .ilink:active { transform: translateY(1px); }
 
-.ilink.active {
-  color: var(--chip-color, var(--menu-accent));
-  font-weight: 700;
+.ilink.active { color: var(--chip-color, var(--menu-accent)); font-weight: 700; }
+.ilink.active .ilink-img {
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.22)) drop-shadow(0 0 0 var(--chip-color));
+  transform: translateY(-2px);
 }
 .ilink.active::after {
   content: "";
   position: absolute;
-  left: 0;
-  right: 0;
+  left: 8px;
+  right: 8px;
   bottom: -2px;
   height: 2px;
   background: var(--chip-color, var(--menu-accent));
   border-radius: 1px;
 }
 
-.ilink-emoji {
-  font-size: 15px;
-  line-height: 1;
+.ilink-icon {
+  display: block;
+  width: 72px;
+  height: 72px;
+  line-height: 0;
 }
+.ilink-img {
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.18));
+  transition: transform 0.12s ease-out, filter 0.12s;
+}
+.ilink-emoji { font-size: 56px; line-height: 72px; }
 .ilink-name { font-size: inherit; }
 
 .ilink-sep {
@@ -371,26 +386,24 @@ html, body, #app {
   color: var(--menu-ink-soft);
   text-transform: lowercase;
   letter-spacing: 0.3px;
+  padding-bottom: 24px;   /* baseline matches text captions, not icons */
 }
-.ilink--mine.active {
-  color: var(--menu-ink);
-  font-weight: 700;
-}
-.ilink--mine.active::after {
-  background: var(--menu-ink);
-}
+.ilink--mine.active { color: var(--menu-ink); font-weight: 700; }
+.ilink--mine.active::after { background: var(--menu-ink); }
 
 @media (max-width: 640px) {
   .interest-nav {
-    top: calc(72px + var(--safe-top));    /* topbar (56) + gutter (16) */
+    top: calc(72px + var(--safe-top));
     left: calc(12px + var(--safe-left));
     right: calc(12px + var(--safe-right));
-    gap: 2px 14px;
-    padding: 6px 14px 6px 4px;
-    height: 32px;
+    gap: 10px;
+    padding: 4px 14px 4px 4px;
+    height: 82px;
   }
-  .ilink { font-size: 13px; padding: 4px 0; }
-  .ilink-emoji { font-size: 14px; }
+  .ilink { font-size: 11px; gap: 3px; padding: 2px 4px 4px; }
+  .ilink-icon, .ilink-img { width: 58px; height: 58px; }
+  .ilink-emoji { font-size: 44px; line-height: 58px; }
+  .ilink--mine { padding-bottom: 20px; }
 }
 
 /* Interest picker inside PinModal */
