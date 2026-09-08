@@ -11,7 +11,7 @@ import Fab from "./components/Fab.vue";
 import BusinessPicker from "./components/BusinessPicker.vue";
 import DetailSheet from "./components/DetailSheet.vue";
 import DisambigModal from "./components/DisambigModal.vue";
-import { authFetch, loadUser, registerUser, type User } from "./user";
+import { authFetch, ensureUser, loadUser, registerUser, type User } from "./user";
 import type {
   Business, CityInfo, Interest, Review, SearchResponse, Verdict,
 } from "./types";
@@ -375,12 +375,13 @@ const submitReview = async ({
       return;
     }
     const review: Review = await res.json();
+    // Always render the pin immediately so the user sees their post land,
+    // even if we're in search mode or the interest filter is about to change.
+    upsertBusinessPin(business, review, false);
     if (review.interest_id !== activeInterest.value) {
-      activeInterest.value = review.interest_id; // watcher will reload
-    } else {
-      upsertBusinessPin(business, review, false);
+      activeInterest.value = review.interest_id; // watcher will reload; pin re-materializes with fresh data
     }
-    // Recenter the map on the business so the user sees their new pin.
+    // Recenter the map on the business so the pin lands in view.
     if (map) map.easeTo({ center: [business.lng, business.lat], zoom: 15, duration: 700 });
   } catch (err) {
     console.error(err);
@@ -485,6 +486,11 @@ const applyStyleCleanup = () => {
 // ---- map init ----------------------------------------------------------
 onMounted(async () => {
   await loadInterests();
+  // If we already have a stored user, verify the server still knows them
+  // (guards against DB resets that stranded the localStorage id).
+  if (user.value) {
+    try { user.value = await ensureUser(user.value); } catch (err) { console.warn("ensureUser failed", err); }
+  }
   if (!mapEl.value) return;
   map = new MLMap({
     container: mapEl.value,

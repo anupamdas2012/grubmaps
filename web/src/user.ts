@@ -56,8 +56,31 @@ export const registerUser = async (displayName: string, existing?: string): Prom
 };
 
 // Common authenticated fetch wrapper — adds X-User-Id if we have one.
-export const authFetch = (user: User | null, url: string, init?: RequestInit) => {
+// If the server 401s with "unknown user" (typically because the DB was
+// reset while our localStorage id survived), re-upsert the user and retry
+// once so the flow doesn't dead-end for the user.
+export const authFetch = async (user: User | null, url: string, init?: RequestInit) => {
   const headers = new Headers(init?.headers ?? {});
   if (user) headers.set("X-User-Id", user.id);
-  return fetch(url, { ...init, headers });
+  const res = await fetch(url, { ...init, headers });
+  if (res.status === 401 && user) {
+    const cloned = res.clone();
+    const body = await cloned.json().catch(() => null) as { error?: string } | null;
+    if (body?.error === "unknown user") {
+      await registerUser(user.displayName, user.id);
+      // Retry once with the freshly-upserted user id.
+      const retryHeaders = new Headers(init?.headers ?? {});
+      retryHeaders.set("X-User-Id", user.id);
+      return fetch(url, { ...init, headers: retryHeaders });
+    }
+  }
+  return res;
+};
+
+// Verify our stored user still exists on the server. If not (fresh DB, etc.),
+// re-upsert it. Call this on app boot after loadUser().
+export const ensureUser = async (user: User): Promise<User> => {
+  const res = await fetch(`/api/users/${encodeURIComponent(user.id)}`);
+  if (res.ok) return user;
+  return registerUser(user.displayName, user.id);
 };
