@@ -18,7 +18,9 @@ export type Business = {
   lat: number;
   lng: number;
   category: string | null;
-  display_name?: string; // present on Nominatim autocomplete results
+  display_name?: string;                // present on Nominatim autocomplete results
+  review_count?: number;                // enriched on search results
+  latest_review?: LatestReviewLite | null; // enriched on search results
 };
 
 export type Review = {
@@ -64,7 +66,8 @@ export type SearchResponse = {
     craving_query?: string;
     reason?: string;
   };
-  named?: Business | null;
+  named?: Business | null;        // legacy top-hit for older clients
+  named_list?: Business[];        // all matching named locations (chains → multiple)
   craving?: { businesses: CravingBusiness[] };
   fallback?: { pois: Business[] };
 };

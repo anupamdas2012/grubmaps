@@ -147,6 +147,33 @@ const countsForReview = (reviewId: number) => {
 const clientIp = (c: { req: { header: (n: string) => string | undefined } }) =>
   c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
 
+// Latest review + total count for a business id. Returns nulls when the
+// business has never been reviewed (or isn't in our DB at all).
+type ReviewStats = {
+  review_count: number;
+  latest_review: {
+    id: number; verdict: number; tag: string; interest_id: string;
+    created_at: number; display_name: string | null;
+  } | null;
+};
+const reviewStatsFor = (businessId: string): ReviewStats => {
+  const latest = db.query(
+    `SELECT r.id, r.verdict, r.tag, r.interest_id, r.created_at, u.display_name
+     FROM reviews r
+     LEFT JOIN users u ON u.id = r.user_id
+     WHERE r.business_id = ?
+     ORDER BY r.created_at DESC
+     LIMIT 1`,
+  ).get(businessId) as {
+    id: number; verdict: number; tag: string; interest_id: string;
+    created_at: number; display_name: string | null;
+  } | null;
+  const countRow = db
+    .query("SELECT COUNT(*) AS n FROM reviews WHERE business_id = ?")
+    .get(businessId) as { n: number };
+  return { review_count: countRow.n, latest_review: latest };
+};
+
 // ---- Nominatim wrapper -------------------------------------------------
 // Nominatim requires a descriptive User-Agent. Their usage policy caps
 // requests at ~1/sec; we do minimal caching to be a good citizen.
@@ -222,6 +249,7 @@ type ClassifierResult = {
   intent: Intent;
   named_query?: string;      // canonical business name if intent=named or ambiguous
   craving_query?: string;    // craving keyword phrase if intent=craving or ambiguous
+  poi_terms?: string[];      // place-database search phrases for craving (chain names, synonyms, categories)
   reason?: string;
 };
 
@@ -233,15 +261,21 @@ async function classifyIntent(q: string, city: string | null): Promise<Classifie
     const looksNamed = words.length <= 4 && words.every((w) => /^[A-Z]/.test(w));
     return looksNamed
       ? { intent: "named", named_query: q.trim(), reason: "heuristic (no LLM)" }
-      : { intent: "craving", craving_query: q.trim(), reason: "heuristic (no LLM)" };
+      : { intent: "craving", craving_query: q.trim(), poi_terms: [q.trim()], reason: "heuristic (no LLM)" };
   }
   const system =
     'You classify short search queries typed into a local-food-review app.\n' +
     'Given the query and the user\'s current city, return strict JSON:\n' +
-    '{"intent":"named"|"craving"|"ambiguous","named_query":"...","craving_query":"...","reason":"..."}\n\n' +
-    '- "named": the query is clearly the name of a specific business (e.g. "Discourse Coffee", "Din Tai Fung").\n' +
-    '- "craving": the query is a cuisine, dish, mood, or descriptor (e.g. "great tacos", "hangover food", "cozy date night").\n' +
-    '- "ambiguous": the query could plausibly be either a well-known brand OR a category (e.g. "blue bottle", "pho", "shake shack" if you cannot tell).\n\n' +
+    '{"intent":"named"|"craving"|"ambiguous","named_query":"...","craving_query":"...","poi_terms":["...","..."],"reason":"..."}\n\n' +
+    '- "named": the query is a distinctive brand or business name, even if it contains a category word. Examples: "Discourse Coffee", "Din Tai Fung", "Cousins Subs", "Shake Shack", "Blue Bottle Coffee", "Jimmy John\'s", "In-N-Out Burger". If the two-or-more-word combination together forms a recognizable brand, choose "named" — do NOT mark it ambiguous just because one word is a category noun.\n' +
+    '- "craving": the query is a bare cuisine, dish, mood, or descriptor with no proper-noun brand token. Examples: "great tacos", "hangover food", "cozy date night", "subs", "pho", "coffee".\n' +
+    '- "ambiguous": use ONLY when the query is a single ambiguous word/phrase that is BOTH a well-known brand AND a bare category noun with no additional qualifier. Examples: "shake shack" (both a chain and "a shack that shakes"? probably still named), "subway" (chain vs a train subway — usually named). Reserve this bucket sparingly. If in doubt, choose "named" over "ambiguous".\n\n' +
+    'poi_terms: for craving/ambiguous intents, return 4-8 short phrases the OpenStreetMap place database (Nominatim) would understand as literal name substrings. Include the craving noun, common chain names, and cuisine synonyms. Examples:\n' +
+    '  "subs" → ["subs","subway","sandwich shop","jimmy johns","jersey mikes","cousins subs","potbelly","milios"]\n' +
+    '  "tacos" → ["taco","taco bell","chipotle","taqueria","mexican restaurant"]\n' +
+    '  "coffee" → ["coffee","cafe","starbucks","dunkin","peets","blue bottle","stumptown"]\n' +
+    '  "burgers" → ["burger","five guys","shake shack","in-n-out","mcdonalds","culvers","smashburger"]\n' +
+    'Pick brand names appropriate to the region if you can (regional chains > national). Keep terms short (1-3 words each).\n\n' +
     'Always include named_query and craving_query when intent is "ambiguous". ' +
     'Return only the JSON, no prose. If the query is a single common food/drink noun, prefer "craving".';
   const user = `city: ${city ?? "(unknown)"}\nquery: ${q}`;
@@ -359,7 +393,7 @@ app.get("/api/pois/search", async (c) => {
   if (q.length < 2) return c.json([]);
   const limit = Math.max(1, Math.min(20, Number(c.req.query("limit") ?? 12)));
   const params: Record<string, string> = {
-    q: city ? `${q} in ${city}` : q,
+    q: city ? `${q}, ${city}` : q,
     format: "json",
     addressdetails: "1",
     limit: String(limit),
@@ -639,14 +673,17 @@ app.post("/api/search", async (c) => {
   const namedQ = cls.named_query ?? q;
   const cravingQ = cls.craving_query ?? q;
 
+  // Return every matching location (chains like "Cousins Subs" have many).
+  // Cap at 10 so the map isn't overwhelmed if Nominatim goes wide. Each
+  // business is enriched with review_count + latest_review if we've seen
+  // it before, so the client can render reviewed pins in full color and
+  // un-reviewed ones as the greyed "be the first" state.
   const findNamed = async () => {
     const hits = await nominatim<NominatimHit[]>("/search", {
       q: cityStr ? `${namedQ}, ${cityStr}` : namedQ,
-      format: "json", addressdetails: "1", limit: "3", dedupe: "1",
+      format: "json", addressdetails: "1", limit: "10", dedupe: "1",
     }).catch(() => [] as NominatimHit[]);
-    if (hits.length === 0) return null;
-    const h = hits[0]!;
-    return {
+    const bases = hits.map((h) => ({
       id: businessIdFor(h),
       source: "osm" as const,
       source_id: h.osm_type && h.osm_id != null ? `${h.osm_type}:${h.osm_id}` : `place:${h.place_id}`,
@@ -656,7 +693,8 @@ app.post("/api/search", async (c) => {
       lat: Number(h.lat),
       lng: Number(h.lon),
       category: [h.class, h.type].filter(Boolean).join(":") || null,
-    };
+    }));
+    return bases.map((b) => ({ ...b, ...reviewStatsFor(b.id) }));
   };
 
   const findCraving = () => {
@@ -720,7 +758,8 @@ app.post("/api/search", async (c) => {
 
   if (cls.intent === "named") {
     const named = await findNamed();
-    return c.json({ intent: "named", classifier: cls, named });
+    // Keep the legacy single-value field for older clients; new clients use `named_list`.
+    return c.json({ intent: "named", classifier: cls, named: named[0] ?? null, named_list: named });
   }
 
   if (cls.intent === "craving") {
@@ -728,13 +767,33 @@ app.post("/api/search", async (c) => {
     if (craving.length > 0) {
       return c.json({ intent: "craving", classifier: cls, craving: { businesses: craving } });
     }
-    // Empty-fallback: fetch POIs for the craving keyword.
-    let pois: unknown[] = [];
-    try {
-      pois = await nominatim<NominatimHit[]>("/search", {
-        q: cityStr ? `${cravingQ} in ${cityStr}` : cravingQ,
-        format: "json", addressdetails: "1", limit: "12", dedupe: "1",
-      }).then((hits) => hits.map((h) => ({
+    // Empty-fallback: expand the craving into several place-search phrases
+    // (chain names, synonyms, category words) and query Nominatim for each
+    // in parallel, merging deduped hits. A single word like "subs" only
+    // matches names containing "subs" — "subway" and "jimmy johns" need
+    // their own queries.
+    const terms = Array.from(new Set(
+      (cls.poi_terms ?? [cravingQ])
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0)
+    )).slice(0, 8);
+
+    const dedup = new Map<string, NominatimHit>();
+    await Promise.all(terms.map(async (term) => {
+      try {
+        const hits = await nominatim<NominatimHit[]>("/search", {
+          q: cityStr ? `${term}, ${cityStr}` : term,
+          format: "json", addressdetails: "1", limit: "10", dedupe: "1",
+        });
+        for (const h of hits) {
+          const id = businessIdFor(h);
+          if (!dedup.has(id)) dedup.set(id, h);
+        }
+      } catch { /* per-term nominatim failure is non-fatal */ }
+    }));
+
+    const pois = Array.from(dedup.values()).slice(0, 30).map((h) => {
+      const base = {
         id: businessIdFor(h),
         source: "osm" as const,
         source_id: h.osm_type && h.osm_id != null ? `${h.osm_type}:${h.osm_id}` : `place:${h.place_id}`,
@@ -744,22 +803,39 @@ app.post("/api/search", async (c) => {
         lat: Number(h.lat),
         lng: Number(h.lon),
         category: [h.class, h.type].filter(Boolean).join(":") || null,
-      })));
-    } catch { /* leave pois empty on nominatim failure */ }
+      };
+      return { ...base, ...reviewStatsFor(base.id) };
+    });
+
     return c.json({
       intent: "craving",
       classifier: cls,
       craving: { businesses: [] },
-      fallback: { pois },
+      fallback: { pois, terms_used: terms },
     });
   }
 
   // ambiguous → return both possibilities for the UI to disambiguate.
-  const [named, craving] = await Promise.all([findNamed(), Promise.resolve(findCraving())]);
+  // Override: if Nominatim returns multiple exact-name matches and we have
+  // no craving hits, the classifier was over-cautious — treat as named.
+  // Guards against "cousins subs" firing the disambig modal just because
+  // "subs" is a category word.
+  const [namedList, craving] = await Promise.all([findNamed(), Promise.resolve(findCraving())]);
+  const nameLower = namedQ.trim().toLowerCase();
+  const exactMatches = namedList.filter((b) => b.name.toLowerCase() === nameLower);
+  if (exactMatches.length >= 2 && craving.length === 0) {
+    return c.json({
+      intent: "named",
+      classifier: { ...cls, reason: `${cls.reason ?? ""} (server override: exact-name matches)` },
+      named: namedList[0] ?? null,
+      named_list: namedList,
+    });
+  }
   return c.json({
     intent: "ambiguous",
     classifier: cls,
-    named,
+    named: namedList[0] ?? null,
+    named_list: namedList,
     craving: { businesses: craving },
   });
 });

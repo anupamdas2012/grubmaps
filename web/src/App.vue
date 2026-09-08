@@ -219,10 +219,64 @@ const runSearch = async (q: string) => {
     const data = (await res.json()) as SearchResponse;
     activeSearchQuery.value = q;
 
-    if (data.intent === "named" && data.named) {
-      // Fly to and open detail. Ensure the business exists in our DB.
-      await upsertBusinessAndOpenDetail(data.named);
-      searchStatus.value = `→ ${data.named.name}`;
+    if (data.intent === "named") {
+      const list = data.named_list ?? (data.named ? [data.named] : []);
+      if (list.length === 0) {
+        searchStatus.value = `No match for "${q}"${city.value ? ` in ${city.value}` : ""}`;
+        return;
+      }
+      if (list.length === 1) {
+        // Single result → fly-to + auto-open the detail sheet.
+        await upsertBusinessAndOpenDetail(list[0]!);
+        searchStatus.value = `→ ${list[0]!.name}`;
+        return;
+      }
+      // Multiple locations of the same name (chains like "Cousins Subs").
+      // Render every pin, then auto-open the detail sheet for the "best"
+      // one — the most-reviewed location, or the top hit if none have
+      // reviews. Preserves the single-hit "sheet opens automatically"
+      // feel while still showing all pins for chains.
+      clearMarkers();
+      await Promise.all(
+        list.map((b) =>
+          fetch("/api/businesses", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(b),
+          }).catch(() => null),
+        ),
+      );
+      let reviewedCount = 0;
+      for (const b of list) {
+        if (b.latest_review) {
+          reviewedCount++;
+          const synth: Review = {
+            id: b.latest_review.id,
+            user_id: "", business_id: b.id, interest_id: b.latest_review.interest_id,
+            tag: b.latest_review.tag, verdict: b.latest_review.verdict,
+            created_at: b.latest_review.created_at,
+            lat: b.lat, lng: b.lng,
+            business_name: b.name, business_address: b.address, business_city: b.city,
+            display_name: b.latest_review.display_name ?? "",
+            legit: 0, dispute: 0, protip: 0,
+          };
+          upsertBusinessPin(b, synth, false);
+        } else {
+          upsertBusinessPin(b, null, true);
+        }
+      }
+      fitBoundsToBusinesses(list);
+
+      // Pick the "best" one to auto-open: prefer any with reviews (highest
+      // review_count wins), else fall back to the top Nominatim hit.
+      const best = [...list].sort((a, b) => (b.review_count ?? 0) - (a.review_count ?? 0))[0]!;
+      openDetail(best.id, best);
+
+      const cityStr = city.value ? ` in ${city.value}` : "";
+      const nameLabel = list[0]!.name;
+      searchStatus.value = reviewedCount === 0
+        ? `${list.length} ${nameLabel} locations${cityStr} · showing best match · close to browse others`
+        : `${list.length} ${nameLabel} locations${cityStr} · ${reviewedCount} reviewed · close to browse others`;
       return;
     }
 
@@ -250,9 +304,31 @@ const runSearch = async (q: string) => {
         fitBoundsToBusinesses(businesses);
         searchStatus.value = `${businesses.length} spot${businesses.length === 1 ? "" : "s"} for "${q}"${city.value ? ` in ${city.value}` : ""}`;
       } else if (data.fallback?.pois && data.fallback.pois.length > 0) {
-        for (const p of data.fallback.pois) upsertBusinessPin(p, null, true);
+        let reviewedCount = 0;
+        for (const p of data.fallback.pois) {
+          if (p.latest_review) {
+            reviewedCount++;
+            const synth: Review = {
+              id: p.latest_review.id,
+              user_id: "", business_id: p.id, interest_id: p.latest_review.interest_id,
+              tag: p.latest_review.tag, verdict: p.latest_review.verdict,
+              created_at: p.latest_review.created_at,
+              lat: p.lat, lng: p.lng,
+              business_name: p.name, business_address: p.address, business_city: p.city,
+              display_name: p.latest_review.display_name ?? "",
+              legit: 0, dispute: 0, protip: 0,
+            };
+            upsertBusinessPin(p, synth, false);
+          } else {
+            upsertBusinessPin(p, null, true);
+          }
+        }
         fitBoundsToBusinesses(data.fallback.pois);
-        searchStatus.value = `No reviews yet for "${q}" — ${data.fallback.pois.length} candidate${data.fallback.pois.length === 1 ? "" : "s"} · be the first`;
+        const cityStr = city.value ? ` in ${city.value}` : "";
+        const n = data.fallback.pois.length;
+        searchStatus.value = reviewedCount === 0
+          ? `${n} candidate${n === 1 ? "" : "s"} for "${q}"${cityStr} · tap one to be the first`
+          : `${n} candidate${n === 1 ? "" : "s"} for "${q}"${cityStr} · ${reviewedCount} reviewed · tap to view or add`;
       } else {
         searchStatus.value = `No results for "${q}"${city.value ? ` in ${city.value}` : ""}`;
       }
