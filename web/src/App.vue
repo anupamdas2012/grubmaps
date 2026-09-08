@@ -7,8 +7,14 @@ import LoginModal from "./components/LoginModal.vue";
 import Logo from "./components/Logo.vue";
 import SearchBar from "./components/SearchBar.vue";
 import InterestSwitcher from "./components/InterestSwitcher.vue";
+import Fab from "./components/Fab.vue";
+import BusinessPicker from "./components/BusinessPicker.vue";
+import DetailSheet from "./components/DetailSheet.vue";
+import DisambigModal from "./components/DisambigModal.vue";
 import { authFetch, loadUser, registerUser, type User } from "./user";
-import type { Interest, Pin, ReactionKind, Verdict } from "./types";
+import type {
+  Business, CityInfo, Interest, Review, SearchResponse, Verdict,
+} from "./types";
 
 const VERDICT_META: Record<Verdict, { cls: "yum" | "meh" | "yuck"; icon: string }> = {
   1: { cls: "yum", icon: "😋" },
@@ -16,63 +22,50 @@ const VERDICT_META: Record<Verdict, { cls: "yum" | "meh" | "yuck"; icon: string 
   [-1]: { cls: "yuck", icon: "💩" },
 };
 
-const REACTIONS: readonly { kind: ReactionKind; emoji: string; label: string }[] = [
-  { kind: "legit", emoji: "🔥", label: "legit" },
-  { kind: "dispute", emoji: "🤔", label: "dispute" },
-  { kind: "protip", emoji: "🧠", label: "pro tip" },
-];
-
-type Pending = { lat: number; lng: number; placeName?: string };
-
 const MILWAUKEE: [number, number] = [-87.9065, 43.0389];
 
 const mapEl = ref<HTMLDivElement | null>(null);
-const pendingPin = ref<Pending | null>(null);
 
-// Auth + interests state
+// Auth + interests
 const user = ref<User | null>(loadUser());
 const needsLogin = computed(() => user.value === null);
 const interests = ref<Interest[]>([]);
 const activeInterest = ref<string>(localStorage.getItem("grubmaps.activeInterest.v1") ?? "food");
 const mineOnly = ref<boolean>(localStorage.getItem("grubmaps.mineOnly.v1") === "1");
 
+// City state (localStorage-cached, GPS-refined on first load)
+const city = ref<string | null>(localStorage.getItem("grubmaps.city.v1"));
+const cityCenter = ref<[number, number] | null>(null);
+
+// Review + fallback pin state (aggregated by business)
+type BusinessPin = {
+  business: Business;
+  reviews: Review[];      // may be empty for fallback pois
+  isFallback: boolean;
+};
+const businessPins = new Map<string, BusinessPin>();
+const businessMarkers = new Map<string, { emoji: Marker; text: Marker }>();
+
+// Modal state
+const pickerBusiness = ref<Business | null>(null);   // set → open ReviewModal (was PinModal)
+const showPicker = ref(false);                       // set → open BusinessPicker
+const pickerPrefill = ref<string>("");
+const detailBusinessId = ref<string | null>(null);
+const detailFallback = ref<Business | null>(null);   // for fallback POIs not yet in DB
+const disambig = ref<{ query: string; named: Business | null; cravingCount: number } | null>(null);
+
+// Search state
+const activeSearchQuery = ref<string>("");           // '' → not in search mode
+const searching = ref(false);
+const searchStatus = ref<string>("");                // hint text under nav
+
+let map: MLMap | null = null;
+
 const activeInterestMeta = computed(
   () => interests.value.find((i) => i.id === activeInterest.value) ?? null,
 );
 
-let map: MLMap | null = null;
-const pinMarkers = new Map<
-  number,
-  { emoji: Marker; text: Marker }
->();
-const pinsById = new Map<number, Pin>();
-
-let activePopover: { marker: Marker; pinId: number } | null = null;
-let searchMarker: { markers: Marker[]; lat: number; lng: number; name: string } | null = null;
-
-const MY_KEY = "grubmaps.myReactions.v1";
-const loadMine = (): Set<string> => {
-  try {
-    const raw = localStorage.getItem(MY_KEY);
-    if (!raw) return new Set();
-    const arr = JSON.parse(raw);
-    return new Set(Array.isArray(arr) ? arr : []);
-  } catch {
-    return new Set();
-  }
-};
-const saveMine = (s: Set<string>) => {
-  try { localStorage.setItem(MY_KEY, JSON.stringify([...s])); } catch { /* ignore */ }
-};
-const myReactions = loadMine();
-const myKey = (pinId: number, kind: ReactionKind) => `${pinId}:${kind}`;
-const currentMyReaction = (pinId: number): ReactionKind | null => {
-  for (const r of REACTIONS) {
-    if (myReactions.has(myKey(pinId, r.kind))) return r.kind;
-  }
-  return null;
-};
-
+// ---- rendering ---------------------------------------------------------
 const seededUnit = (id: number, salt: number) => {
   const s = Math.sin(id * 9301.7 + salt) * 43758.5453;
   return s - Math.floor(s);
@@ -83,308 +76,317 @@ const seededYumDelay = (id: number) => seededUnit(id, 71723.5) * 7;
 const interestColor = (id: string) =>
   interests.value.find((i) => i.id === id)?.color ?? "#333";
 
-const renderPin = (pin: Pin) => {
+// Render one marker per business. For businesses with reviews, use the most
+// recent review to source the emoji/tag/color. Fallback POIs render greyed
+// with the business name as the tag.
+const renderBusinessMarker = (pin: BusinessPin) => {
   if (!map) return;
-  pinsById.set(pin.id, pin);
-  if (pinMarkers.has(pin.id)) return;
-  const { cls, icon } = VERDICT_META[pin.verdict];
-  const accent = interestColor(pin.interest_id);
+  const { business, reviews, isFallback } = pin;
+
+  // Remove any existing marker for this business (idempotent re-render).
+  const existing = businessMarkers.get(business.id);
+  if (existing) {
+    existing.emoji.remove();
+    existing.text.remove();
+    businessMarkers.delete(business.id);
+  }
+
+  const seed = business.id.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+  let icon: string;
+  let cls: "yum" | "meh" | "yuck" | "fallback";
+  let tag: string;
+  let accent: string;
+
+  if (isFallback || reviews.length === 0) {
+    icon = "❔";
+    cls = "fallback";
+    tag = business.name;
+    accent = "#94a3b8";
+  } else {
+    const latest = reviews[0]!;
+    const meta = VERDICT_META[latest.verdict];
+    icon = meta.icon;
+    cls = meta.cls;
+    tag = latest.tag;
+    accent = interestColor(latest.interest_id);
+  }
 
   const emojiOuter = document.createElement("div");
   const emojiInner = document.createElement("div");
   emojiInner.className = `pin-emoji ${cls}`;
   emojiInner.textContent = icon;
-  if (cls === "yum") {
-    emojiInner.style.animationDelay = `${seededYumDelay(pin.id).toFixed(2)}s`;
-  }
+  if (cls === "yum") emojiInner.style.animationDelay = `${seededYumDelay(seed).toFixed(2)}s`;
   emojiOuter.appendChild(emojiInner);
   emojiOuter.addEventListener("click", (e) => {
     e.stopPropagation();
-    openPopover(pin.id);
+    openDetail(business.id, isFallback ? business : null);
   });
   const emojiMarker = new Marker({ element: emojiOuter, anchor: "center" })
-    .setLngLat([pin.lng, pin.lat])
+    .setLngLat([business.lng, business.lat])
     .addTo(map);
 
   const textOuter = document.createElement("div");
   const textRot = document.createElement("div");
-  textRot.style.transform = `rotate(${seededRotation(pin.id).toFixed(2)}deg)`;
+  textRot.style.transform = `rotate(${seededRotation(seed).toFixed(2)}deg)`;
   const textInner = document.createElement("div");
   textInner.className = `pin-text ${cls}`;
-  textInner.textContent = pin.tag;
+  textInner.textContent = tag;
   textInner.style.setProperty("--pin-accent", accent);
-  if (cls === "yum") {
-    textInner.style.animationDelay = `${seededYumDelay(pin.id).toFixed(2)}s`;
-  }
+  if (cls === "yum") textInner.style.animationDelay = `${seededYumDelay(seed).toFixed(2)}s`;
   textRot.appendChild(textInner);
   textOuter.appendChild(textRot);
   textOuter.addEventListener("click", (e) => {
     e.stopPropagation();
-    openPopover(pin.id);
+    openDetail(business.id, isFallback ? business : null);
   });
   const textMarker = new Marker({ element: textOuter, anchor: "top", offset: [0, 18] })
-    .setLngLat([pin.lng, pin.lat])
+    .setLngLat([business.lng, business.lat])
     .addTo(map);
 
-  pinMarkers.set(pin.id, { emoji: emojiMarker, text: textMarker });
+  businessMarkers.set(business.id, { emoji: emojiMarker, text: textMarker });
 };
 
-const clearPins = () => {
-  for (const { emoji, text } of pinMarkers.values()) {
-    emoji.remove();
-    text.remove();
+const clearMarkers = () => {
+  for (const m of businessMarkers.values()) {
+    m.emoji.remove();
+    m.text.remove();
   }
-  pinMarkers.clear();
-  pinsById.clear();
-  closePopover();
+  businessMarkers.clear();
+  businessPins.clear();
 };
 
+const upsertBusinessPin = (business: Business, review: Review | null, isFallback = false) => {
+  const existing = businessPins.get(business.id);
+  if (existing) {
+    if (review && !existing.reviews.find((r) => r.id === review.id)) {
+      existing.reviews.unshift(review); // most-recent first
+    }
+    existing.isFallback = existing.reviews.length === 0 && isFallback;
+  } else {
+    businessPins.set(business.id, {
+      business,
+      reviews: review ? [review] : [],
+      isFallback: review ? false : isFallback,
+    });
+  }
+  const pin = businessPins.get(business.id)!;
+  renderBusinessMarker(pin);
+};
+
+// ---- data loaders ------------------------------------------------------
 const loadInterests = async () => {
   const res = await fetch("/api/interests");
   if (!res.ok) return;
   interests.value = await res.json();
 };
 
-const loadPins = async () => {
-  clearPins();
+const loadReviews = async () => {
+  clearMarkers();
+  activeSearchQuery.value = "";
+  searchStatus.value = "";
   const q = new URLSearchParams();
   q.set("interest", activeInterest.value);
   if (mineOnly.value && user.value) q.set("user", user.value.id);
+  if (city.value) q.set("city", city.value);
   try {
-    const res = await fetch(`/api/pins?${q.toString()}`);
+    const res = await fetch(`/api/reviews?${q.toString()}`);
     if (!res.ok) return;
-    const pins: Pin[] = await res.json();
-    pins.forEach(renderPin);
-  } catch (err) {
-    console.error("failed to load pins", err);
-  }
-};
-
-// ---- popover -----------------------------------------------------------
-let closeAnimTimer: number | null = null;
-const CLOSE_ANIM_MS = 220;
-
-const cancelCloseAnim = () => {
-  if (closeAnimTimer !== null) {
-    window.clearTimeout(closeAnimTimer);
-    closeAnimTimer = null;
-  }
-};
-
-const closePopover = () => {
-  if (!activePopover) return;
-  const marker = activePopover.marker;
-  const pinId = activePopover.pinId;
-  marker.getElement().classList.add("closing");
-  cancelCloseAnim();
-  closeAnimTimer = window.setTimeout(() => {
-    closeAnimTimer = null;
-    marker.remove();
-    if (activePopover && activePopover.pinId === pinId) activePopover = null;
-  }, CLOSE_ANIM_MS);
-};
-
-const FAN_ANGLES = ["-45deg", "0deg", "45deg"] as const;
-
-const buildPopoverEl = (pin: Pin): HTMLElement => {
-  const el = document.createElement("div");
-  el.className = "reaction-fan";
-  REACTIONS.forEach((r, i) => {
-    const btn = document.createElement("button");
-    btn.className = "reaction-btn";
-    if (currentMyReaction(pin.id) === r.kind) btn.classList.add("reacted");
-    btn.title = r.label;
-    btn.style.setProperty("--angle", FAN_ANGLES[i]);
-    const emojiSpan = document.createElement("span");
-    emojiSpan.className = "reaction-emoji";
-    emojiSpan.textContent = r.emoji;
-    const countSpan = document.createElement("span");
-    countSpan.className = "reaction-count";
-    countSpan.textContent = String(pin[r.kind]);
-    btn.appendChild(emojiSpan);
-    btn.appendChild(countSpan);
-    btn.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      void reactTo(pin.id, r.kind);
-    });
-    el.appendChild(btn);
-  });
-  el.addEventListener("click", (ev) => ev.stopPropagation());
-  return el;
-};
-
-const openPopover = (pinId: number) => {
-  if (!map) return;
-  const pin = pinsById.get(pinId);
-  if (!pin) return;
-
-  if (activePopover?.pinId === pinId) {
-    const el = activePopover.marker.getElement();
-    if (el.classList.contains("closing")) {
-      el.classList.remove("closing");
-      cancelCloseAnim();
+    const reviews = (await res.json()) as Review[];
+    for (const r of reviews) {
+      const business: Business = {
+        id: r.business_id, source: "osm", source_id: "",
+        name: r.business_name, address: r.business_address,
+        city: r.business_city, lat: r.lat, lng: r.lng, category: null,
+      };
+      upsertBusinessPin(business, r, false);
     }
-    return;
-  }
-
-  if (activePopover) {
-    cancelCloseAnim();
-    activePopover.marker.remove();
-    activePopover = null;
-  }
-
-  const el = buildPopoverEl(pin);
-  const marker = new Marker({ element: el, anchor: "center", offset: [0, 0] })
-    .setLngLat([pin.lng, pin.lat])
-    .addTo(map);
-  activePopover = { marker, pinId };
-};
-
-const refreshOpenPopover = () => {
-  if (!activePopover) return;
-  const pin = pinsById.get(activePopover.pinId);
-  if (!pin) return;
-  const el = activePopover.marker.getElement();
-  const current = currentMyReaction(pin.id);
-  const buttons = el.querySelectorAll<HTMLButtonElement>(".reaction-btn");
-  buttons.forEach((btn, i) => {
-    const r = REACTIONS[i];
-    if (!r) return;
-    btn.classList.toggle("reacted", current === r.kind);
-    const countEl = btn.querySelector(".reaction-count");
-    if (countEl) countEl.textContent = String(pin[r.kind]);
-  });
-};
-
-const reactTo = async (pinId: number, kind: ReactionKind) => {
-  const pin = pinsById.get(pinId);
-  if (!pin) return;
-
-  const prevKind = currentMyReaction(pinId);
-  const isToggleOff = prevKind === kind;
-  const snapshot = { legit: pin.legit, dispute: pin.dispute, protip: pin.protip };
-
-  if (prevKind) pin[prevKind] = Math.max(0, pin[prevKind] - 1);
-  if (!isToggleOff) pin[kind]++;
-  if (prevKind) myReactions.delete(myKey(pinId, prevKind));
-  if (!isToggleOff) myReactions.add(myKey(pinId, kind));
-  saveMine(myReactions);
-  refreshOpenPopover();
-
-  try {
-    const res = await fetch(`/api/pins/${pinId}/reactions`, {
-      method: isToggleOff ? "DELETE" : "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind }),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    const data = (await res.json()) as { reactions: { legit: number; dispute: number; protip: number } };
-    pin.legit = data.reactions.legit;
-    pin.dispute = data.reactions.dispute;
-    pin.protip = data.reactions.protip;
-    refreshOpenPopover();
   } catch (err) {
-    pin.legit = snapshot.legit;
-    pin.dispute = snapshot.dispute;
-    pin.protip = snapshot.protip;
-    if (prevKind) myReactions.add(myKey(pinId, prevKind));
-    if (!isToggleOff) myReactions.delete(myKey(pinId, kind));
-    saveMine(myReactions);
-    refreshOpenPopover();
-    console.error("react failed", err);
+    console.error("failed to load reviews", err);
   }
 };
 
-// ---- search callout ----------------------------------------------------
-const closeSearchMarker = () => {
-  if (searchMarker) {
-    for (const m of searchMarker.markers) m.remove();
-    searchMarker = null;
-  }
-};
-
-const openReviewFromSearch = () => {
-  if (!searchMarker) return;
-  const { lat, lng, name } = searchMarker;
-  pendingPin.value = { lat, lng, placeName: name };
-  closeSearchMarker();
-};
-
-const onSearchSelect = ({ lat, lng, name }: { lat: number; lng: number; name: string }) => {
-  if (!map) return;
-  map.easeTo({ center: [lng, lat], zoom: 17, duration: 800 });
-  closeSearchMarker();
-
-  const outer = document.createElement("div");
-  outer.addEventListener("click", (e) => e.stopPropagation());
-  const inner = document.createElement("div");
-  inner.className = "search-target";
-
-  const cta = document.createElement("button");
-  cta.type = "button";
-  cta.className = "search-target-cta";
-  cta.textContent = "Rate this spot?";
-  cta.setAttribute("title", name);
-  cta.addEventListener("click", (e) => {
-    e.stopPropagation();
-    openReviewFromSearch();
-  });
-
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "search-target-close";
-  close.setAttribute("aria-label", "Cancel");
-  close.textContent = "✕";
-  close.addEventListener("click", (e) => {
-    e.stopPropagation();
-    closeSearchMarker();
-  });
-
-  inner.appendChild(cta);
-  inner.appendChild(close);
-  outer.appendChild(inner);
-  const wrapMarker = new Marker({ element: outer, anchor: "center" })
-    .setLngLat([lng, lat])
-    .addTo(map);
-
-  searchMarker = { markers: [wrapMarker], lat, lng, name };
-};
-
-// ---- pin submit --------------------------------------------------------
-const submitPin = async ({
-  tag,
-  verdict,
-  interest_id,
-}: {
-  tag: string;
-  verdict: Verdict;
-  interest_id: string;
-}) => {
-  if (!pendingPin.value || !user.value) return;
-  const { lat, lng } = pendingPin.value;
+// ---- search + intent routing ------------------------------------------
+const runSearch = async (q: string) => {
+  if (!q.trim()) return;
+  searching.value = true;
   try {
-    const res = await authFetch(user.value, "/api/pins", {
+    const res = await fetch("/api/search", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ lat, lng, tag, verdict, interest_id }),
+      body: JSON.stringify({ q, city: city.value }),
+    });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = (await res.json()) as SearchResponse;
+    activeSearchQuery.value = q;
+
+    if (data.intent === "named" && data.named) {
+      // Fly to and open detail. Ensure the business exists in our DB.
+      await upsertBusinessAndOpenDetail(data.named);
+      searchStatus.value = `→ ${data.named.name}`;
+      return;
+    }
+
+    if (data.intent === "craving") {
+      const businesses = data.craving?.businesses ?? [];
+      clearMarkers();
+      for (const b of businesses) {
+        // Hydrate the pin with the business's latest review so it renders
+        // with the real verdict/tag/color instead of the fallback "❔" style.
+        const synthReview = b.latest_review
+          ? {
+              id: b.latest_review.id,
+              user_id: "", business_id: b.id, interest_id: b.latest_review.interest_id,
+              tag: b.latest_review.tag, verdict: b.latest_review.verdict,
+              created_at: b.latest_review.created_at,
+              lat: b.lat, lng: b.lng,
+              business_name: b.name, business_address: b.address, business_city: b.city,
+              display_name: b.latest_review.display_name ?? "",
+              legit: 0, dispute: 0, protip: 0,
+            } as Review
+          : null;
+        upsertBusinessPin(b, synthReview, false);
+      }
+      if (businesses.length > 0) {
+        fitBoundsToBusinesses(businesses);
+        searchStatus.value = `${businesses.length} spot${businesses.length === 1 ? "" : "s"} for "${q}"${city.value ? ` in ${city.value}` : ""}`;
+      } else if (data.fallback?.pois && data.fallback.pois.length > 0) {
+        for (const p of data.fallback.pois) upsertBusinessPin(p, null, true);
+        fitBoundsToBusinesses(data.fallback.pois);
+        searchStatus.value = `No reviews yet for "${q}" — ${data.fallback.pois.length} candidate${data.fallback.pois.length === 1 ? "" : "s"} · be the first`;
+      } else {
+        searchStatus.value = `No results for "${q}"${city.value ? ` in ${city.value}` : ""}`;
+      }
+      return;
+    }
+
+    if (data.intent === "ambiguous") {
+      disambig.value = {
+        query: q,
+        named: data.named ?? null,
+        cravingCount: data.craving?.businesses?.length ?? 0,
+      };
+    }
+  } catch (err) {
+    console.error("search failed", err);
+    searchStatus.value = "Search failed.";
+  } finally {
+    searching.value = false;
+  }
+};
+
+const chooseDisambig = async (choice: "named" | "craving") => {
+  if (!disambig.value) return;
+  const d = disambig.value;
+  disambig.value = null;
+  if (choice === "named" && d.named) {
+    await upsertBusinessAndOpenDetail(d.named);
+    searchStatus.value = `→ ${d.named.name}`;
+    activeSearchQuery.value = d.query;
+    return;
+  }
+  // Fall back to craving: rerun with a hint by wrapping the search as craving.
+  // Simplest: rerun the query — server will still route based on classifier.
+  // For a stronger UX, we could add a `force_intent` parameter.
+  await runSearch(d.query);
+};
+
+const fitBoundsToBusinesses = (list: { lat: number; lng: number }[]) => {
+  if (!map || list.length === 0) return;
+  if (list.length === 1) {
+    map.easeTo({ center: [list[0]!.lng, list[0]!.lat], zoom: 16, duration: 800 });
+    return;
+  }
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  for (const b of list) {
+    if (b.lat < minLat) minLat = b.lat;
+    if (b.lat > maxLat) maxLat = b.lat;
+    if (b.lng < minLng) minLng = b.lng;
+    if (b.lng > maxLng) maxLng = b.lng;
+  }
+  map.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 80, duration: 800, maxZoom: 15 });
+};
+
+const upsertBusinessAndOpenDetail = async (b: Business) => {
+  // Ensure the business is in our DB so DetailSheet can load /api/businesses/:id.
+  try {
+    await fetch("/api/businesses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(b),
+    });
+  } catch { /* upsert is idempotent on the server; ignore failures */ }
+  upsertBusinessPin(b, null, false);
+  if (map) map.easeTo({ center: [b.lng, b.lat], zoom: 17, duration: 800 });
+  openDetail(b.id, b);
+};
+
+// ---- FAB flow ----------------------------------------------------------
+const onFab = () => {
+  if (!user.value) return;
+  pickerPrefill.value = "";
+  showPicker.value = true;
+};
+
+const onPickerCancel = () => { showPicker.value = false; };
+
+const onPickerPick = async (b: Business) => {
+  showPicker.value = false;
+  // Save to DB first so review submit can reference it.
+  try {
+    await fetch("/api/businesses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(b),
+    });
+  } catch (err) { console.error("business upsert failed", err); }
+  pickerBusiness.value = b;
+};
+
+// ---- detail sheet flow -------------------------------------------------
+const openDetail = (businessId: string, fallbackBusiness: Business | null) => {
+  detailFallback.value = fallbackBusiness;
+  detailBusinessId.value = businessId;
+};
+const closeDetail = () => {
+  detailBusinessId.value = null;
+  detailFallback.value = null;
+};
+
+const onDetailWriteReview = (b: Business) => {
+  detailBusinessId.value = null;
+  pickerBusiness.value = b;
+};
+
+// ---- review submit -----------------------------------------------------
+const submitReview = async ({
+  tag, verdict, interest_id,
+}: { tag: string; verdict: Verdict; interest_id: string }) => {
+  if (!pickerBusiness.value || !user.value) return;
+  const business = pickerBusiness.value;
+  try {
+    const res = await authFetch(user.value, "/api/reviews", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ business_id: business.id, tag, verdict, interest_id }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "unknown" }));
       alert(`Could not post: ${err.error ?? res.statusText}`);
       return;
     }
-    const pin: Pin = await res.json();
-    if (pin.interest_id === activeInterest.value) {
-      renderPin(pin);
+    const review: Review = await res.json();
+    if (review.interest_id !== activeInterest.value) {
+      activeInterest.value = review.interest_id; // watcher will reload
     } else {
-      // Switch to the interest we just posted into so the user sees it.
-      activeInterest.value = pin.interest_id;
+      upsertBusinessPin(business, review, false);
     }
+    // Recenter the map on the business so the user sees their new pin.
+    if (map) map.easeTo({ center: [business.lng, business.lat], zoom: 15, duration: 700 });
   } catch (err) {
     console.error(err);
     alert("Network error.");
   } finally {
-    pendingPin.value = null;
+    pickerBusiness.value = null;
   }
 };
 
@@ -398,27 +400,57 @@ const onLoginSubmit = async (name: string) => {
   }
 };
 
+// ---- city --------------------------------------------------------------
+const setCity = (c: string) => {
+  city.value = c;
+  localStorage.setItem("grubmaps.city.v1", c);
+  if (activeSearchQuery.value) {
+    void runSearch(activeSearchQuery.value);
+  } else {
+    void loadReviews();
+  }
+};
+
+const detectCity = async () => {
+  if (city.value) return; // already set (localStorage)
+  if (!("geolocation" in navigator)) return;
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      try {
+        const res = await fetch(
+          `/api/city/reverse?lat=${pos.coords.latitude}&lng=${pos.coords.longitude}`,
+        );
+        if (!res.ok) return;
+        const info = (await res.json()) as CityInfo;
+        if (info.city) {
+          city.value = info.city;
+          localStorage.setItem("grubmaps.city.v1", info.city);
+          cityCenter.value = [info.lng, info.lat];
+          if (map) map.easeTo({ center: [info.lng, info.lat], zoom: 12, duration: 600 });
+          void loadReviews();
+        }
+      } catch (err) { console.error("city reverse-geocode failed", err); }
+    },
+    (err) => { console.log("geolocation denied/unavailable:", err.message); },
+    { timeout: 8000, maximumAge: 24 * 60 * 60 * 1000 },
+  );
+};
+
 // ---- interest / mine changes ------------------------------------------
 watch(activeInterest, (id) => {
   localStorage.setItem("grubmaps.activeInterest.v1", id);
-  void loadPins();
+  if (!activeSearchQuery.value) void loadReviews();
 });
 watch(mineOnly, (v) => {
   localStorage.setItem("grubmaps.mineOnly.v1", v ? "1" : "0");
-  void loadPins();
+  if (!activeSearchQuery.value) void loadReviews();
 });
 
 // ---- map cleanup pass --------------------------------------------------
-// Non-major road *lines* fade in with zoom: fully hidden below 14, ghost
-// trace at neighborhood zoom, fully drawn by 19 when you're on the block.
-// Non-road labels are dropped entirely; road labels are filtered to majors.
 const MAJOR_ROAD_RE = /motorway|trunk|primary|secondary/i;
 const MINOR_ROAD_OPACITY: ExpressionSpecification = [
   "interpolate", ["linear"], ["zoom"],
-  14, 0,
-  15, 0.15,
-  17, 0.55,
-  19, 1.0,
+  14, 0, 15, 0.15, 17, 0.55, 19, 1.0,
 ];
 
 const applyStyleCleanup = () => {
@@ -427,15 +459,13 @@ const applyStyleCleanup = () => {
   for (const layer of style.layers) {
     const src = (layer as { "source-layer"?: string })["source-layer"];
     const id = layer.id.toLowerCase();
-
     if (layer.type === "symbol") {
       const isRoadLabel =
         src === "transportation_name" ||
         id.includes("road") || id.includes("street") || id.includes("highway");
       if (isRoadLabel) {
         map.setFilter(layer.id, [
-          "in",
-          ["get", "class"],
+          "in", ["get", "class"],
           ["literal", ["motorway", "trunk", "primary", "secondary"]],
         ]);
       } else {
@@ -443,13 +473,11 @@ const applyStyleCleanup = () => {
       }
       continue;
     }
-
     if (layer.type !== "line") continue;
     const isRoadLine =
       src === "transportation" || id.includes("road") || id.includes("bridge") || id.includes("tunnel");
     if (!isRoadLine) continue;
     if (MAJOR_ROAD_RE.test(id)) continue;
-
     map.setPaintProperty(layer.id, "line-opacity", MINOR_ROAD_OPACITY);
   }
 };
@@ -457,7 +485,6 @@ const applyStyleCleanup = () => {
 // ---- map init ----------------------------------------------------------
 onMounted(async () => {
   await loadInterests();
-
   if (!mapEl.value) return;
   map = new MLMap({
     container: mapEl.value,
@@ -465,45 +492,30 @@ onMounted(async () => {
     center: MILWAUKEE,
     zoom: 12,
   });
-
   map.on("load", () => {
     if (!map) return;
     applyStyleCleanup();
-    void loadPins();
+    void loadReviews();
+    void detectCity();
   });
-
   map.addControl(new NavigationControl({ showCompass: false }), "bottom-right");
-
   const canvas = map.getCanvas();
-  canvas.style.cursor = "crosshair";
-
-  map.on("click", (e) => {
-    if (activePopover) {
-      closePopover();
-      return;
-    }
-    if (searchMarker) {
-      closeSearchMarker();
-      return;
-    }
-    if (!user.value) return; // must be logged in to drop a pin
-    pendingPin.value = { lat: e.lngLat.lat, lng: e.lngLat.lng };
-  });
+  canvas.style.cursor = "grab";
+  // Map is browse-only. No click handler on the canvas.
 });
 
 const onKeydown = (e: KeyboardEvent) => {
   if (e.key !== "Escape") return;
-  if (pendingPin.value) pendingPin.value = null;
-  else if (activePopover) closePopover();
-  else if (searchMarker) closeSearchMarker();
+  if (pickerBusiness.value) pickerBusiness.value = null;
+  else if (showPicker.value) showPicker.value = false;
+  else if (detailBusinessId.value) closeDetail();
+  else if (disambig.value) disambig.value = null;
 };
 onMounted(() => window.addEventListener("keydown", onKeydown));
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
-  closePopover();
-  closeSearchMarker();
-  clearPins();
+  clearMarkers();
   map?.remove();
   map = null;
 });
@@ -512,7 +524,13 @@ onBeforeUnmount(() => {
 <template>
   <header class="topbar">
     <Logo />
-    <SearchBar @select="onSearchSelect" />
+    <SearchBar
+      :city="city"
+      :loading="searching"
+      @submit="runSearch"
+      @city-change="setCity"
+      @clear="loadReviews"
+    />
   </header>
   <InterestSwitcher
     v-if="interests.length > 0 && user"
@@ -524,27 +542,52 @@ onBeforeUnmount(() => {
     @update:mine="mineOnly = $event"
   />
   <div class="hint">
-    <template v-if="user && activeInterestMeta">
+    <template v-if="searchStatus">{{ searchStatus }}</template>
+    <template v-else-if="user && activeInterestMeta">
       {{ mineOnly ? "your tour ·" : "everyone's" }}
       {{ activeInterestMeta.emoji }} {{ activeInterestMeta.name.toLowerCase() }}
-      · tap the map to add a spot
+      · tap "+" to review a spot
     </template>
-    <template v-else>Tap the map · brutally honest, 8 words max</template>
+    <template v-else>Sign in to review · tap a pin to see what people think</template>
   </div>
   <div class="map-frame">
     <div ref="mapEl" class="map"></div>
+    <Fab v-if="user" @click="onFab" />
   </div>
 
   <LoginModal v-if="needsLogin" @submit="onLoginSubmit" />
 
+  <BusinessPicker
+    v-if="showPicker"
+    :city="city"
+    :prefill-query="pickerPrefill"
+    @cancel="onPickerCancel"
+    @pick="onPickerPick"
+  />
+
   <PinModal
-    v-if="pendingPin && user"
-    :lat="pendingPin.lat"
-    :lng="pendingPin.lng"
-    :place-name="pendingPin.placeName"
+    v-if="pickerBusiness && user"
+    :business="pickerBusiness"
     :interests="interests"
     :default-interest="activeInterest"
-    @cancel="pendingPin = null"
-    @submit="submitPin"
+    @cancel="pickerBusiness = null"
+    @submit="submitReview"
+  />
+
+  <DetailSheet
+    v-if="detailBusinessId"
+    :business-id="detailBusinessId"
+    :is-fallback="!!detailFallback"
+    @close="closeDetail"
+    @write-review="onDetailWriteReview"
+  />
+
+  <DisambigModal
+    v-if="disambig"
+    :query="disambig.query"
+    :named-candidate="disambig.named"
+    :craving-count="disambig.cravingCount"
+    @choose="chooseDisambig"
+    @cancel="disambig = null"
   />
 </template>

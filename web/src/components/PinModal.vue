@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { Interest, Verdict } from "../types";
+import type { Business, Interest, Verdict } from "../types";
 
 const props = defineProps<{
-  lat: number;
-  lng: number;
-  placeName?: string;
+  business: Business;
   interests: Interest[];
   defaultInterest: string;
 }>();
@@ -58,10 +56,9 @@ const onSubmit = () => {
 <template>
   <div class="modal-backdrop" @click.self="emit('cancel')">
     <div class="menu-card menu-card--modal">
-      <div class="menu-card-eyebrow">a new entry for</div>
-      <h2 class="menu-card-title">
-        {{ props.placeName ?? "your tour" }}
-      </h2>
+      <div class="menu-card-eyebrow">a review for</div>
+      <h2 class="menu-card-title">{{ props.business.name }}</h2>
+      <div v-if="props.business.address" class="menu-card-sub">{{ props.business.address }}</div>
       <div class="menu-card-rule"></div>
 
       <label class="menu-card-label">Category</label>
@@ -132,9 +129,7 @@ const onSubmit = () => {
       </div>
 
       <div class="actions">
-        <button class="menu-btn menu-btn--secondary" @click="emit('cancel')">
-          Cancel
-        </button>
+        <button class="menu-btn menu-btn--secondary" @click="emit('cancel')">Cancel</button>
         <button
           class="menu-btn menu-btn--primary"
           :disabled="!canSubmit || submitting"
