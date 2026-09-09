@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onBeforeUnmount, computed } from "vue";
 import type { Business, Review, Verdict } from "../types";
+import { api } from "../api";
 
 const props = defineProps<{
   // Passed by App.vue whenever a pin is tapped — contains everything we
@@ -56,7 +57,7 @@ const load = async () => {
   abort = new AbortController();
   try {
     const res = await fetch(
-      `/api/businesses/${encodeURIComponent(props.business.id)}`,
+      api(`/api/businesses/${encodeURIComponent(props.business.id)}`),
       { signal: abort.signal },
     );
     if (res.status === 404) {
@@ -97,7 +98,7 @@ const toggleGoodCall = async (review: Review) => {
   }
   saveMyGoodCalls();
   try {
-    const res = await fetch(`/api/reviews/${review.id}/reactions`, {
+    const res = await fetch(api(`/api/reviews/${review.id}/reactions`), {
       method: marked ? "DELETE" : "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ kind: "legit" }),

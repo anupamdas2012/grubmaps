@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onBeforeUnmount, onMounted, watch } from "vue";
 import type { Business } from "../types";
+import { API_URL } from "../api";
 
 const props = defineProps<{
   city: string | null;
@@ -32,7 +33,7 @@ const doSearch = async (q: string) => {
   abort = new AbortController();
   loading.value = true;
   try {
-    const url = new URL("/api/places/search", location.origin);
+    const url = new URL("/api/places/search", API_URL || location.origin);
     url.searchParams.set("q", trimmed);
     if (props.city) url.searchParams.set("city", props.city);
     url.searchParams.set("limit", "8");

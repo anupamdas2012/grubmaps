@@ -1,11 +1,14 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
+import { serveStatic } from "hono/bun";
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 
 // New DB for the review-placement UX. Keeps the old tour DB around for
-// easy revert. Drop this file to start over.
-const db = new Database("grubmaps-review.db");
+// easy revert. Drop this file to start over. In prod (Fly.io) the DB
+// lives on a persistent volume mounted at /data.
+const DB_PATH = process.env.DB_PATH ?? "grubmaps-review.db";
+const db = new Database(DB_PATH);
 db.exec("PRAGMA foreign_keys = ON");
 db.exec("PRAGMA journal_mode = WAL");
 
@@ -786,6 +789,20 @@ app.post("/api/search", async (c) => {
   const namedQ = cls.named_query ?? q;
   const cravingQ = cls.craving_query ?? q;
 
+  // Pre-fetch the city bounding box so every Nominatim + Overpass call
+  // below stays strictly within it. Without this, searches like "pad thai"
+  // pull hits from across the country and the client's fitBounds shows
+  // the whole USA.
+  const cityBboxCoords = cityStr ? await cityBbox(cityStr) : null;
+  // Nominatim viewbox format: minLon,maxLat,maxLon,minLat  (W,N,E,S).
+  // Our cityBbox returns [S, W, N, E], so re-order for the API.
+  const nominatimBoundParams: Record<string, string> = cityBboxCoords
+    ? {
+        viewbox: `${cityBboxCoords[1]},${cityBboxCoords[2]},${cityBboxCoords[3]},${cityBboxCoords[0]}`,
+        bounded: "1",
+      }
+    : {};
+
   // Return every matching location (chains like "Cousins Subs" have many).
   // Cap at 10 so the map isn't overwhelmed if Nominatim goes wide. Each
   // business is enriched with review_count + latest_review if we've seen
@@ -795,6 +812,7 @@ app.post("/api/search", async (c) => {
     const hits = await nominatim<NominatimHit[]>("/search", {
       q: cityStr ? `${namedQ}, ${cityStr}` : namedQ,
       format: "json", addressdetails: "1", limit: "10", dedupe: "1",
+      ...nominatimBoundParams,
     }).catch(() => [] as NominatimHit[]);
     const bases = hits.map((h) => ({
       id: businessIdFor(h),
@@ -885,7 +903,7 @@ app.post("/api/search", async (c) => {
     // All three are merged, deduped by business_id, sorted (reviewed
     // first), capped at 30 pins.
     const ftsHits = findCraving();
-    const bbox = cityStr ? await cityBbox(cityStr) : null;
+    const bbox = cityBboxCoords;
     const cuisines = (cls.cuisines ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean);
     const amenities = (cls.amenities ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean);
     const terms = Array.from(new Set(
@@ -905,12 +923,16 @@ app.post("/api/search", async (c) => {
     }
 
     // Nominatim: name-based expansion for chains + generic terms.
+    // Scoped strictly to the city bbox via viewbox+bounded so a
+    // craving search like "pad thai" doesn't drag in results from
+    // across the country.
     const nominatimDedup = new Map<string, NominatimHit>();
     await Promise.all(terms.map(async (term) => {
       try {
         const hits = await nominatim<NominatimHit[]>("/search", {
           q: cityStr ? `${term}, ${cityStr}` : term,
           format: "json", addressdetails: "1", limit: "10", dedupe: "1",
+          ...nominatimBoundParams,
         });
         for (const h of hits) {
           const id = businessIdFor(h);
@@ -992,6 +1014,89 @@ function ftsQuery(q: string): string {
   return words.length > 0 ? words.join(" OR ") : '""';
 }
 
+// ---- synthesis (LLM-summarized cluster text) ---------------------------
+// POST /api/synthesize { tags: string[] } → { synthesis: string }
+// Distills 2-20 short review tags into one 3-6 word "voice of the crowd"
+// phrase used as the label on cluster pins. Cached aggressively by the
+// sorted-tag hash so panning/zooming that regroups the same members
+// doesn't re-hit OpenAI.
+const synthesisCache = new Map<string, { at: number; value: string }>();
+const SYNTHESIS_TTL_MS = 24 * 60 * 60 * 1000; // 24h; tags rarely change
+
+app.post("/api/synthesize", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object") return c.json({ error: "invalid body" }, 400);
+  const rawTags = (body as Record<string, unknown>).tags;
+  if (!Array.isArray(rawTags)) return c.json({ error: "tags array required" }, 400);
+  const tags = rawTags
+    .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+    .map((t) => t.trim())
+    .slice(0, 20);
+  if (tags.length === 0) return c.json({ synthesis: "" });
+  if (tags.length === 1) return c.json({ synthesis: tags[0] });
+
+  const key = createHash("sha256").update([...tags].sort().join("|")).digest("hex").slice(0, 24);
+  const hit = synthesisCache.get(key);
+  if (hit && Date.now() - hit.at < SYNTHESIS_TTL_MS) return c.json({ synthesis: hit.value, cached: true });
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    // Graceful fallback with no LLM: use the first tag.
+    return c.json({ synthesis: tags[0], fallback: "no-key" });
+  }
+
+  const system =
+    'You distill multiple short food reviews into ONE punchy phrase (3-6 words, no period, no quotes) that captures the crowd\'s combined take on a cluster of nearby restaurants. The phrase goes on a map label, so make it evocative and readable.\n\n' +
+    'Examples:\n' +
+    '["best carbonara","great pizza","italian gem"] → loved for italian classics\n' +
+    '["amazing pho","great banh mi","solid ramen"] → asian noodle destination\n' +
+    '["cold beer great vibes","best old fashioned","excellent negroni"] → cocktail hotspot\n' +
+    '["decent pasta forgettable sauce","overpriced tourist trap","microwaved lasagna energy"] → skip the italian here\n' +
+    '["best al pastor east side","carne asada is life","salsa bar is chef\'s kiss"] → east side taco heaven\n\n' +
+    'Return only the phrase, lowercase preferred, no quotes.';
+
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: process.env.OPENAI_TEXT_MODEL ?? "gpt-4o-mini",
+        temperature: 0.4,
+        max_tokens: 40,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: JSON.stringify(tags) },
+        ],
+      }),
+    });
+    if (!res.ok) throw new Error(`OpenAI ${res.status}`);
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const raw = data.choices?.[0]?.message?.content?.trim() ?? tags[0]!;
+    const synthesis = raw.replace(/^["'`]|["'`]$/g, "").slice(0, 60);
+    synthesisCache.set(key, { at: Date.now(), value: synthesis });
+    return c.json({ synthesis });
+  } catch (err) {
+    console.warn("synthesis failed:", err);
+    return c.json({ synthesis: tags[0], fallback: String(err) });
+  }
+});
+
+// ---- static asset serving (production only) ----------------------------
+// When STATIC_DIR is set (e.g. STATIC_DIR=web/dist in Fly.io), this Hono
+// process also serves the built Vue app. Local dev leaves STATIC_DIR
+// unset and Vite handles the frontend on :5173.
+const STATIC_DIR = process.env.STATIC_DIR;
+if (STATIC_DIR) {
+  app.use("/*", serveStatic({ root: STATIC_DIR }));
+  // SPA fallback — any unmatched GET returns index.html so the client
+  // router can take over.
+  app.get("*", serveStatic({ path: `${STATIC_DIR}/index.html` }));
+}
+
 const port = Number(process.env.PORT ?? 3001);
-console.log(`grubmaps-review api listening on http://localhost:${port}`);
+console.log(`grubmaps-review api listening on http://localhost:${port}` +
+  (STATIC_DIR ? ` (also serving static files from ${STATIC_DIR})` : ""));
 export default { port, fetch: app.fetch };

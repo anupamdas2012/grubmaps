@@ -1,6 +1,8 @@
 // Lightweight, non-secure "auth": user id + display name in localStorage.
 // Server trusts X-User-Id. This is a prototype convenience, not real auth.
 
+import { api } from "./api";
+
 const USER_KEY = "grubmaps.user.v1";
 
 export type User = { id: string; displayName: string };
@@ -43,7 +45,7 @@ const uuid = (): string => {
 // canonical user record (id may differ if we passed nothing).
 export const registerUser = async (displayName: string, existing?: string): Promise<User> => {
   const id = existing ?? uuid();
-  const res = await fetch("/api/users", {
+  const res = await fetch(api("/api/users"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, display_name: displayName }),
@@ -62,7 +64,7 @@ export const registerUser = async (displayName: string, existing?: string): Prom
 export const authFetch = async (user: User | null, url: string, init?: RequestInit) => {
   const headers = new Headers(init?.headers ?? {});
   if (user) headers.set("X-User-Id", user.id);
-  const res = await fetch(url, { ...init, headers });
+  const res = await fetch(api(url), { ...init, headers });
   if (res.status === 401 && user) {
     const cloned = res.clone();
     const body = await cloned.json().catch(() => null) as { error?: string } | null;
@@ -71,7 +73,7 @@ export const authFetch = async (user: User | null, url: string, init?: RequestIn
       // Retry once with the freshly-upserted user id.
       const retryHeaders = new Headers(init?.headers ?? {});
       retryHeaders.set("X-User-Id", user.id);
-      return fetch(url, { ...init, headers: retryHeaders });
+      return fetch(api(url), { ...init, headers: retryHeaders });
     }
   }
   return res;
@@ -80,7 +82,7 @@ export const authFetch = async (user: User | null, url: string, init?: RequestIn
 // Verify our stored user still exists on the server. If not (fresh DB, etc.),
 // re-upsert it. Call this on app boot after loadUser().
 export const ensureUser = async (user: User): Promise<User> => {
-  const res = await fetch(`/api/users/${encodeURIComponent(user.id)}`);
+  const res = await fetch(api(`/api/users/${encodeURIComponent(user.id)}`));
   if (res.ok) return user;
   return registerUser(user.displayName, user.id);
 };

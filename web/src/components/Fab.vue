@@ -11,6 +11,6 @@ defineEmits<{ click: [] }>();
     @click="$emit('click')"
   >
     <span class="fab-plus" aria-hidden="true">+</span>
-    <span class="fab-label">review</span>
+    <span class="fab-label">Yum!</span>
   </button>
 </template>

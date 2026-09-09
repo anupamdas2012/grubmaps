@@ -1,0 +1,41 @@
+# Fly.io deploy config for the Grubmaps/Crave backend.
+# Rename `app` before first `fly launch` (Fly picks the name if omitted).
+#
+# Deploy flow:
+#   fly launch --no-deploy       (creates the app; edit this file to match)
+#   fly volumes create grubmaps_data --size 1 --region ord
+#   fly secrets set OPENAI_API_KEY=sk-...
+#   fly deploy
+#
+# Seed the demo data:
+#   fly ssh console -C 'bun run tools/simulate-users.ts'
+
+app = "crave-grubmaps"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3001"
+  DB_PATH = "/data/grubmaps-review.db"
+
+[http_service]
+  internal_port = 3001
+  force_https = true
+  auto_stop_machines = true      # sleeps when idle to stay in the free tier
+  auto_start_machines = true     # wakes on next request (~2s cold start)
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 200
+    soft_limit = 100
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+[[mounts]]
+  source = "grubmaps_data"
+  destination = "/data"

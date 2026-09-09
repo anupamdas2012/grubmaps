@@ -13,6 +13,7 @@ import BusinessPicker from "./components/BusinessPicker.vue";
 import DetailSheet from "./components/DetailSheet.vue";
 import DisambigModal from "./components/DisambigModal.vue";
 import { authFetch, ensureUser, loadUser, registerUser, type User } from "./user";
+import { api } from "./api";
 import type {
   Business, CityInfo, Interest, Review, SearchResponse, Verdict,
 } from "./types";
@@ -68,7 +69,6 @@ const seededUnit = (id: number, salt: number) => {
   return s - Math.floor(s);
 };
 const seededRotation = (id: number) => (seededUnit(id, 49297.3) - 0.5) * 12;
-const seededYumDelay = (id: number) => seededUnit(id, 71723.5) * 7;
 
 const interestColor = (id: string) =>
   interests.value.find((i) => i.id === id)?.color ?? "#333";
@@ -101,11 +101,25 @@ const renderBusinessMarker = (pin: BusinessPin) => {
     accent = "#94a3b8";
   } else {
     const latest = reviews[0]!;
-    const meta = VERDICT_META[latest.verdict];
+    // Aggregate sentiment across ALL reviews so a mostly-loved spot
+    // shows 😋 even if the latest reviewer was grumpy. Average verdict
+    // in [-1..1]; ±0.2 threshold gives a slight-majority reading.
+    const avgVerdict = reviews.reduce((s, r) => s + r.verdict, 0) / reviews.length;
+    const aggVerdict: Verdict = avgVerdict > 0.2 ? 1 : avgVerdict < -0.2 ? -1 : 0;
+    const meta = VERDICT_META[aggVerdict];
     icon = meta.icon;
     cls = meta.cls;
-    tag = latest.tag;
     accent = interestColor(latest.interest_id);
+    // For a single-review spot, use the tag as-is. For multiple, use
+    // the synthesized summary if we've cached it, otherwise show the
+    // latest as a placeholder until the async /api/synthesize replies.
+    if (reviews.length >= 2) {
+      const tags = reviews.map((r) => r.tag);
+      const key = [...tags].sort().join("|");
+      tag = synthesisCache.get(key) ?? latest.tag;
+    } else {
+      tag = latest.tag;
+    }
   }
 
   // Hot signal — businesses with lots of reviews and/or Good-calls get
@@ -117,11 +131,21 @@ const renderBusinessMarker = (pin: BusinessPin) => {
   const hotTier: "" | " hot" | " superhot" =
     hotScore >= 10 ? " superhot" : hotScore >= 5 ? " hot" : "";
 
+  // Yum wiggle: random per-render phase (negative delay starts mid-cycle)
+  // + slightly randomized duration (5–9s) so pins never re-sync into a
+  // single group wiggle. Emoji + text of the same business use the same
+  // values so they wiggle in lockstep.
+  const wiggleDuration = 5 + Math.random() * 4;
+  const wigglePhase = Math.random() * wiggleDuration;
+
   const emojiOuter = document.createElement("div");
   const emojiInner = document.createElement("div");
   emojiInner.className = `pin-emoji ${cls}${hotTier}`;
   emojiInner.textContent = icon;
-  if (cls === "yum") emojiInner.style.animationDelay = `${seededYumDelay(seed).toFixed(2)}s`;
+  if (cls === "yum") {
+    emojiInner.style.animationDuration = `${wiggleDuration.toFixed(2)}s`;
+    emojiInner.style.animationDelay = `-${wigglePhase.toFixed(2)}s`;
+  }
   emojiOuter.appendChild(emojiInner);
   emojiOuter.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -138,7 +162,10 @@ const renderBusinessMarker = (pin: BusinessPin) => {
   textInner.className = `pin-text ${cls}${hotTier}`;
   textInner.textContent = tag;
   textInner.style.setProperty("--pin-accent", accent);
-  if (cls === "yum") textInner.style.animationDelay = `${seededYumDelay(seed).toFixed(2)}s`;
+  if (cls === "yum") {
+    textInner.style.animationDuration = `${wiggleDuration.toFixed(2)}s`;
+    textInner.style.animationDelay = `-${wigglePhase.toFixed(2)}s`;
+  }
   textRot.appendChild(textInner);
   textOuter.appendChild(textRot);
   textOuter.addEventListener("click", (e) => {
@@ -150,6 +177,29 @@ const renderBusinessMarker = (pin: BusinessPin) => {
     .addTo(map);
 
   businessMarkers.set(business.id, { emoji: emojiMarker, text: textMarker });
+
+  // For multi-review businesses, ask the LLM for a "voice of the crowd"
+  // summary of all their tags so the pin doesn't cherry-pick the latest.
+  // Cached in `synthesisCache` so panning doesn't re-hit the API.
+  if (!isFallback && reviews.length >= 2) {
+    const tags = reviews.map((r) => r.tag);
+    const key = [...tags].sort().join("|");
+    if (!synthesisCache.has(key)) {
+      void fetch(api("/api/synthesize"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tags }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data: { synthesis?: string } | null) => {
+          if (data?.synthesis) {
+            synthesisCache.set(key, data.synthesis);
+            if (textInner.isConnected) textInner.textContent = data.synthesis;
+          }
+        })
+        .catch(() => { /* keep the latest-review placeholder */ });
+    }
+  }
 };
 
 const clearMarkers = () => {
@@ -175,13 +225,205 @@ const upsertBusinessPin = (business: Business, review: Review | null, isFallback
       isFallback: review ? false : isFallback,
     });
   }
-  const pin = businessPins.get(business.id)!;
-  renderBusinessMarker(pin);
+  scheduleCluster();
+};
+
+// ---- density clustering with LLM-synthesized labels --------------------
+// Overlapping pin labels are the map's #1 clutter source. At every zoom
+// we project each pin to screen pixels and greedy-group ones within
+// CLUSTER_THRESHOLD_PX. Clusters of 1 render as normal pins; clusters
+// of 2+ render as a single "voice of the crowd" pin whose text comes
+// from /api/synthesize — one short phrase distilled from the member
+// tags by gpt-4o-mini. Cached client-side by sorted-tag key so
+// re-clustering the same group is instant.
+const CLUSTER_THRESHOLD_PX = 90;
+const synthesisCache = new Map<string, string>();
+let clusterTimer: number | null = null;
+
+const scheduleCluster = () => {
+  if (clusterTimer !== null) window.clearTimeout(clusterTimer);
+  clusterTimer = window.setTimeout(() => { clusterAndRender(); }, 180);
+};
+
+type ClusterMember = { pin: BusinessPin; x: number; y: number };
+
+const clusterAndRender = () => {
+  if (!map) return;
+  // Drop all existing markers before rebuilding.
+  for (const m of businessMarkers.values()) {
+    m.emoji.remove();
+    m.text.remove();
+  }
+  businessMarkers.clear();
+
+  const items: ClusterMember[] = Array.from(businessPins.values()).map((pin) => {
+    const px = map!.project([pin.business.lng, pin.business.lat]);
+    return { pin, x: px.x, y: px.y };
+  });
+
+  // Greedy clustering — O(n²), fine for our N ≤ 100 pins.
+  const claimed = new Set<string>();
+  const clusters: ClusterMember[][] = [];
+  for (const item of items) {
+    if (claimed.has(item.pin.business.id)) continue;
+    const cluster = [item];
+    claimed.add(item.pin.business.id);
+    for (const other of items) {
+      if (claimed.has(other.pin.business.id)) continue;
+      const dx = other.x - item.x;
+      const dy = other.y - item.y;
+      if (dx * dx + dy * dy < CLUSTER_THRESHOLD_PX * CLUSTER_THRESHOLD_PX) {
+        cluster.push(other);
+        claimed.add(other.pin.business.id);
+      }
+    }
+    clusters.push(cluster);
+  }
+
+  for (const cluster of clusters) {
+    if (cluster.length === 1) {
+      renderBusinessMarker(cluster[0]!.pin);
+      continue;
+    }
+    // Split cluster members by whether they have real reviews.
+    const reviewed = cluster.filter((c) => c.pin.reviews.length > 0);
+    const fallback = cluster.filter((c) => c.pin.reviews.length === 0);
+
+    if (reviewed.length >= 2) {
+      renderClusterMarker(reviewed);
+    } else if (reviewed.length === 1) {
+      renderBusinessMarker(reviewed[0]!.pin);
+    }
+    // Fallback (unreviewed) pins in a crowded area collapse to bare dots.
+    // Text label returns once you zoom in enough that they aren't
+    // overlapping any longer (the next scheduleCluster pass upgrades
+    // them back to full pins).
+    for (const m of fallback) renderDotOnly(m.pin);
+  }
+};
+
+const renderDotOnly = (pin: BusinessPin) => {
+  if (!map) return;
+  const el = document.createElement("div");
+  const dot = document.createElement("div");
+  dot.className = "pin-dot";
+  dot.title = pin.business.name;
+  el.appendChild(dot);
+  el.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openDetail(pin.business.id, pin.business);
+  });
+  const marker = new Marker({ element: el, anchor: "center" })
+    .setLngLat([pin.business.lng, pin.business.lat])
+    .addTo(map);
+  // Store as both emoji + text so clearMarkers cleans it up uniformly.
+  businessMarkers.set(pin.business.id, { emoji: marker, text: marker });
+};
+
+const renderClusterMarker = (cluster: ClusterMember[]) => {
+  if (!map) return;
+
+  const centroid: [number, number] = [
+    cluster.reduce((s, c) => s + c.pin.business.lng, 0) / cluster.length,
+    cluster.reduce((s, c) => s + c.pin.business.lat, 0) / cluster.length,
+  ];
+
+  // Collect real-review tags (skip fallback POIs which have no tag yet).
+  const tags = cluster
+    .map((c) => c.pin.reviews[0]?.tag)
+    .filter((t): t is string => typeof t === "string");
+
+  // Hottest member drives color/accent, but the emoji reflects the
+  // aggregate sentiment across every review in the cluster so the
+  // face matches the crowd's overall vibe, not a single reviewer's.
+  const scored = cluster
+    .map((c) => c.pin)
+    .filter((p) => p.reviews.length > 0)
+    .map((p) => ({
+      pin: p,
+      score: p.reviews.length + (p.reviews[0]?.legit ?? 0) / 2,
+    }))
+    .sort((a, b) => b.score - a.score);
+  const hottest = scored[0]?.pin ?? cluster[0]!.pin;
+  const hottestReview = hottest.reviews[0];
+  const allReviews = cluster.flatMap((c) => c.pin.reviews);
+  let cls: "yum" | "meh" | "yuck" | "fallback" = "fallback";
+  let icon = "❔";
+  if (allReviews.length > 0) {
+    const avg = allReviews.reduce((s, r) => s + r.verdict, 0) / allReviews.length;
+    const agg: Verdict = avg > 0.2 ? 1 : avg < -0.2 ? -1 : 0;
+    cls = VERDICT_META[agg].cls;
+    icon = VERDICT_META[agg].icon;
+  }
+  const accent = hottestReview ? interestColor(hottestReview.interest_id) : "#94a3b8";
+
+  const cacheKey = tags.length > 0 ? [...tags].sort().join("|") : `fallback:${cluster.length}`;
+  const cachedSynth = synthesisCache.get(cacheKey);
+  const placeholder =
+    tags.length === 0
+      ? `${cluster.length} spots · be first`
+      : tags[0] ?? `${cluster.length} spots`;
+  const initialText = cachedSynth ?? placeholder;
+
+  const openCluster = () => {
+    if (!map) return;
+    map.easeTo({
+      center: centroid,
+      zoom: Math.min((map.getZoom() ?? 12) + 2, 18),
+      duration: 500,
+    });
+  };
+
+  const emojiOuter = document.createElement("div");
+  const emojiInner = document.createElement("div");
+  emojiInner.className = `pin-emoji ${cls} superhot cluster`;
+  emojiInner.textContent = icon;
+  const badge = document.createElement("span");
+  badge.className = "pin-cluster-badge";
+  badge.textContent = `+${cluster.length - 1}`;
+  emojiInner.appendChild(badge);
+  emojiOuter.appendChild(emojiInner);
+  emojiOuter.addEventListener("click", (e) => { e.stopPropagation(); openCluster(); });
+  const emojiMarker = new Marker({ element: emojiOuter, anchor: "center" })
+    .setLngLat(centroid)
+    .addTo(map);
+
+  const textOuter = document.createElement("div");
+  const textInner = document.createElement("div");
+  textInner.className = `pin-text ${cls} superhot cluster`;
+  textInner.textContent = initialText;
+  textInner.style.setProperty("--pin-accent", accent);
+  textOuter.appendChild(textInner);
+  textOuter.addEventListener("click", (e) => { e.stopPropagation(); openCluster(); });
+  const textMarker = new Marker({ element: textOuter, anchor: "top", offset: [0, 22] })
+    .setLngLat(centroid)
+    .addTo(map);
+
+  // Store under a synthetic id so the next clusterAndRender can clean it up.
+  const clusterId = `cluster:${cacheKey.slice(0, 24)}:${cluster.length}`;
+  businessMarkers.set(clusterId, { emoji: emojiMarker, text: textMarker });
+
+  // Fetch a synthesized label if we don't have one cached yet.
+  if (!cachedSynth && tags.length >= 2) {
+    void fetch(api("/api/synthesize"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tags }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { synthesis?: string } | null) => {
+        if (data?.synthesis) {
+          synthesisCache.set(cacheKey, data.synthesis);
+          if (textInner.isConnected) textInner.textContent = data.synthesis;
+        }
+      })
+      .catch(() => { /* keep placeholder */ });
+  }
 };
 
 // ---- data loaders ------------------------------------------------------
 const loadInterests = async () => {
-  const res = await fetch("/api/interests");
+  const res = await fetch(api("/api/interests"));
   if (!res.ok) return;
   interests.value = await res.json();
 };
@@ -195,7 +437,7 @@ const loadReviews = async () => {
   if (mineOnly.value && user.value) q.set("user", user.value.id);
   if (city.value) q.set("city", city.value);
   try {
-    const res = await fetch(`/api/reviews?${q.toString()}`);
+    const res = await fetch(api(`/api/reviews?${q.toString()}`));
     if (!res.ok) return;
     const reviews = (await res.json()) as Review[];
     for (const r of reviews) {
@@ -216,7 +458,7 @@ const runSearch = async (q: string) => {
   if (!q.trim()) return;
   searching.value = true;
   try {
-    const res = await fetch("/api/search", {
+    const res = await fetch(api("/api/search"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ q, city: city.value }),
@@ -245,7 +487,7 @@ const runSearch = async (q: string) => {
       clearMarkers();
       await Promise.all(
         list.map((b) =>
-          fetch("/api/businesses", {
+          fetch(api("/api/businesses"), {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(b),
@@ -360,20 +602,29 @@ const fitBoundsToBusinesses = (list: { lat: number; lng: number }[]) => {
     map.easeTo({ center: [list[0]!.lng, list[0]!.lat], zoom: 16, duration: 800 });
     return;
   }
-  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
-  for (const b of list) {
-    if (b.lat < minLat) minLat = b.lat;
-    if (b.lat > maxLat) maxLat = b.lat;
-    if (b.lng < minLng) minLng = b.lng;
-    if (b.lng > maxLng) maxLng = b.lng;
+  // Some search paths may include a stray result outside the current city.
+  // If the raw bounds span more than a metro-area distance, use the tight
+  // subset around the densest cluster (median-based) so we don't fly out
+  // to the whole USA.
+  const METRO_DEGREE_SPAN = 1.2; // ≈130km — generous metro cutoff
+  let lats = list.map((b) => b.lat).sort((a, z) => a - z);
+  let lngs = list.map((b) => b.lng).sort((a, z) => a - z);
+  const rawSpan = Math.max(lats.at(-1)! - lats[0]!, lngs.at(-1)! - lngs[0]!);
+  if (rawSpan > METRO_DEGREE_SPAN) {
+    // Trim outliers: use the middle 90% of points on each axis.
+    const drop = Math.floor(list.length * 0.05);
+    lats = lats.slice(drop, list.length - drop);
+    lngs = lngs.slice(drop, list.length - drop);
   }
+  const minLat = lats[0]!, maxLat = lats.at(-1)!;
+  const minLng = lngs[0]!, maxLng = lngs.at(-1)!;
   map.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 80, duration: 800, maxZoom: 15 });
 };
 
 const upsertBusinessAndOpenDetail = async (b: Business) => {
   // Ensure the business is in our DB so DetailSheet can load /api/businesses/:id.
   try {
-    await fetch("/api/businesses", {
+    await fetch(api("/api/businesses"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(b),
@@ -397,7 +648,7 @@ const onPickerPick = async (b: Business) => {
   showPicker.value = false;
   // Save to DB first so review submit can reference it.
   try {
-    await fetch("/api/businesses", {
+    await fetch(api("/api/businesses"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(b),
@@ -435,7 +686,7 @@ const submitReview = async ({
     // Upsert the business first — it may be a fallback pin from Overpass
     // or Nominatim that was never saved. POST /api/businesses is idempotent
     // (409-safe), so this is always cheap and never hurts.
-    await fetch("/api/businesses", {
+    await fetch(api("/api/businesses"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(business),
@@ -576,6 +827,9 @@ onMounted(async () => {
     attributionControl: false,               // we add our own below, positioned bottom-left
   });
   map.addControl(new AttributionControl({ compact: true }), "bottom-left");
+  // Re-cluster whenever the visible pixel projection changes.
+  map.on("zoomend", scheduleCluster);
+  map.on("moveend", scheduleCluster);
   map.on("load", () => {
     if (!map) return;
     applyStyleCleanup();

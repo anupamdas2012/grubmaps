@@ -974,6 +974,50 @@ body:has(.modal-backdrop) .fab { opacity: 0; pointer-events: none; transition: o
  * bloom bigger so the crowd's favorites read at a glance.  */
 .pin-emoji.hot      { transform: scale(1.15); filter: drop-shadow(0 2px 4px rgba(25, 20, 16, 0.55)); }
 .pin-emoji.superhot { transform: scale(1.35); filter: drop-shadow(0 3px 6px rgba(25, 20, 16, 0.6)); }
+
+/* Cluster pin — carries a small pink "+N" badge so it's obviously
+ * an aggregate. Text uses the .cluster class for potential styling. */
+.pin-emoji.cluster { position: relative; }
+.pin-cluster-badge {
+  position: absolute;
+  top: -6px;
+  right: -14px;
+  background: var(--menu-accent);
+  color: #fff;
+  font-family: var(--font-heading);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  min-width: 22px;
+  text-align: center;
+  border: 1.5px solid #fff;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.28);
+  line-height: 1;
+}
+/* Subtle dotted underline under cluster text so it reads as "synthesized"
+ * to careful eyes — non-distracting for the casual scan. */
+.pin-text.cluster { border-bottom: 1.5px dotted currentColor; padding-bottom: 1px; }
+
+/* Bare dot for crowded unreviewed pins — text label suppressed until
+ * you zoom in enough that they're no longer overlapping. Uses the
+ * accent red so each dot reads as an invitation ("be the first"),
+ * not just noise. */
+.pin-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--menu-accent);
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(225, 29, 72, 0.35);
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.15s;
+}
+.pin-dot:hover {
+  transform: scale(1.45);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(225, 29, 72, 0.35);
+}
 .pin-text.hot {
   font-size: 20px;
   font-weight: 800;
