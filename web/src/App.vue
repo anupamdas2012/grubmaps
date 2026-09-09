@@ -61,10 +61,6 @@ const searchStatus = ref<string>("");                // hint text under nav
 
 let map: MLMap | null = null;
 
-const activeInterestMeta = computed(
-  () => interests.value.find((i) => i.id === activeInterest.value) ?? null,
-);
-
 // ---- rendering ---------------------------------------------------------
 const seededUnit = (id: number, salt: number) => {
   const s = Math.sin(id * 9301.7 + salt) * 43758.5453;
@@ -617,14 +613,8 @@ onBeforeUnmount(() => {
     @update:active="activeInterest = $event"
     @update:mine="mineOnly = $event"
   />
-  <div class="hint">
-    <template v-if="searchStatus">{{ searchStatus }}</template>
-    <template v-else-if="user && activeInterestMeta">
-      {{ mineOnly ? "your tour ·" : "everyone's" }}
-      {{ activeInterestMeta.emoji }} {{ activeInterestMeta.name.toLowerCase() }}
-      · tap "+" to review a spot
-    </template>
-    <template v-else>Sign in to review · tap a pin to see what people think</template>
+  <div v-if="searchStatus" class="hint">
+    {{ searchStatus }}
   </div>
   <div class="map-frame">
     <div ref="mapEl" class="map"></div>

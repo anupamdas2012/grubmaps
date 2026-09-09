@@ -438,18 +438,21 @@ html, body, #app {
   border-color: var(--menu-ink);
 }
 
-/* ============================ BOTTOM HINT ============================== */
+/* ============================ SEARCH-STATUS PILL =======================
+ * Only visible when the user has an active search; sits just above the
+ * map card so it doesn't collide with the bottom-center FAB.
+ */
 .hint {
   position: absolute;
-  bottom: calc(16px + var(--safe-bottom));
+  top: calc(180px + var(--safe-top));   /* just above the map (map top = 192) */
   left: 50%;
   transform: translateX(-50%);
   z-index: 5;
   background: var(--menu-ink);
   color: var(--menu-bg);
-  padding: 8px 16px;
+  padding: 8px 18px;
   border: 2px solid var(--menu-ink);
-  border-radius: 4px;
+  border-radius: 999px;
   font-family: var(--font-heading);
   font-size: 13px;
   font-weight: 600;
@@ -459,7 +462,22 @@ html, body, #app {
   max-width: calc(100% - 32px);
   text-align: center;
   white-space: nowrap;
-  box-shadow: 0 2px 8px rgba(25, 20, 16, 0.28);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 4px 14px rgba(25, 20, 16, 0.35);
+  animation: hint-pop 220ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes hint-pop {
+  from { opacity: 0; transform: translate(-50%, -6px) scale(0.94); }
+  to   { opacity: 1; transform: translate(-50%, 0)    scale(1);    }
+}
+@media (max-width: 640px) {
+  .hint {
+    top: calc(158px + var(--safe-top)); /* map top on mobile = 170 */
+    font-size: 12px;
+    padding: 7px 14px;
+    max-width: calc(100% - 24px);
+  }
 }
 
 /* ============================ MAP TILES ================================ */
@@ -889,33 +907,41 @@ html, body, #app {
 /* ============================ FAB (write review) ======================= */
 .fab {
   position: absolute;
-  right: 18px;
-  bottom: 18px;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 6;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 18px 12px 14px;
+  gap: 10px;
+  padding: 14px 24px 14px 20px;
   border-radius: 999px;
   border: 2px solid var(--menu-ink);
   background: var(--menu-accent);
   color: #fff;
   font-family: var(--font-heading);
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.8px;
+  letter-spacing: 1px;
   cursor: pointer;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 8px 24px rgba(225, 29, 72, 0.4), 0 2px 6px rgba(0, 0, 0, 0.18);
   -webkit-tap-highlight-color: transparent;
-  transition: transform 0.1s ease-out, box-shadow 0.15s;
+  transition: transform 0.12s ease-out, box-shadow 0.15s, background 0.15s;
 }
-.fab:hover  { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28); }
-.fab:active { transform: translateY(0);   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24); }
-.fab-plus   { font-size: 22px; font-weight: 900; line-height: 1; }
+.fab:hover  { transform: translateX(-50%) translateY(-2px); box-shadow: 0 12px 30px rgba(225, 29, 72, 0.5), 0 3px 8px rgba(0, 0, 0, 0.22); }
+.fab:active { transform: translateX(-50%) translateY(0);    box-shadow: 0 4px 12px rgba(225, 29, 72, 0.3); }
+.fab-plus   { font-size: 24px; font-weight: 900; line-height: 1; }
 .fab-label  { line-height: 1; }
 @media (max-width: 640px) {
-  .fab { right: 12px; bottom: 12px; padding: 10px 14px 10px 12px; font-size: 13px; }
+  .fab {
+    bottom: calc(16px + var(--safe-bottom));
+    padding: 12px 20px 12px 16px;
+    font-size: 14px;
+  }
+  .fab-plus { font-size: 22px; }
+  .fab:hover  { transform: translateX(-50%) translateY(-2px); }
+  .fab:active { transform: translateX(-50%) translateY(0); }
 }
 
 /* ============================ SEARCH DIVIDER / SUBMIT ================== */
