@@ -283,52 +283,34 @@ const runSearch = async (q: string) => {
     if (data.intent === "craving") {
       const businesses = data.craving?.businesses ?? [];
       clearMarkers();
+      let reviewedCount = 0;
       for (const b of businesses) {
-        // Hydrate the pin with the business's latest review so it renders
-        // with the real verdict/tag/color instead of the fallback "❔" style.
-        const synthReview = b.latest_review
-          ? {
-              id: b.latest_review.id,
-              user_id: "", business_id: b.id, interest_id: b.latest_review.interest_id,
-              tag: b.latest_review.tag, verdict: b.latest_review.verdict,
-              created_at: b.latest_review.created_at,
-              lat: b.lat, lng: b.lng,
-              business_name: b.name, business_address: b.address, business_city: b.city,
-              display_name: b.latest_review.display_name ?? "",
-              legit: 0, dispute: 0, protip: 0,
-            } as Review
-          : null;
-        upsertBusinessPin(b, synthReview, false);
+        // Reviewed spots render in full color with the latest review tag;
+        // unreviewed ones render greyed with a "be the first" style.
+        if (b.latest_review) {
+          reviewedCount++;
+          const synth: Review = {
+            id: b.latest_review.id,
+            user_id: "", business_id: b.id, interest_id: b.latest_review.interest_id,
+            tag: b.latest_review.tag, verdict: b.latest_review.verdict,
+            created_at: b.latest_review.created_at,
+            lat: b.lat, lng: b.lng,
+            business_name: b.name, business_address: b.address, business_city: b.city,
+            display_name: b.latest_review.display_name ?? "",
+            legit: 0, dispute: 0, protip: 0,
+          };
+          upsertBusinessPin(b, synth, false);
+        } else {
+          upsertBusinessPin(b, null, true);
+        }
       }
       if (businesses.length > 0) {
         fitBoundsToBusinesses(businesses);
-        searchStatus.value = `${businesses.length} spot${businesses.length === 1 ? "" : "s"} for "${q}"${city.value ? ` in ${city.value}` : ""}`;
-      } else if (data.fallback?.pois && data.fallback.pois.length > 0) {
-        let reviewedCount = 0;
-        for (const p of data.fallback.pois) {
-          if (p.latest_review) {
-            reviewedCount++;
-            const synth: Review = {
-              id: p.latest_review.id,
-              user_id: "", business_id: p.id, interest_id: p.latest_review.interest_id,
-              tag: p.latest_review.tag, verdict: p.latest_review.verdict,
-              created_at: p.latest_review.created_at,
-              lat: p.lat, lng: p.lng,
-              business_name: p.name, business_address: p.address, business_city: p.city,
-              display_name: p.latest_review.display_name ?? "",
-              legit: 0, dispute: 0, protip: 0,
-            };
-            upsertBusinessPin(p, synth, false);
-          } else {
-            upsertBusinessPin(p, null, true);
-          }
-        }
-        fitBoundsToBusinesses(data.fallback.pois);
         const cityStr = city.value ? ` in ${city.value}` : "";
-        const n = data.fallback.pois.length;
+        const n = businesses.length;
         searchStatus.value = reviewedCount === 0
-          ? `${n} candidate${n === 1 ? "" : "s"} for "${q}"${cityStr} · tap one to be the first`
-          : `${n} candidate${n === 1 ? "" : "s"} for "${q}"${cityStr} · ${reviewedCount} reviewed · tap to view or add`;
+          ? `${n} spot${n === 1 ? "" : "s"} for "${q}"${cityStr} · tap one to be the first`
+          : `${n} spot${n === 1 ? "" : "s"} for "${q}"${cityStr} · ${reviewedCount} reviewed · tap any to view or add`;
       } else {
         searchStatus.value = `No results for "${q}"${city.value ? ` in ${city.value}` : ""}`;
       }

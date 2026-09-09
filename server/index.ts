@@ -198,6 +198,110 @@ async function nominatim<T>(path: string, params: Record<string, string>): Promi
   return json;
 }
 
+// ---- Overpass wrapper --------------------------------------------------
+// Overpass exposes real OSM tags (cuisine=italian, amenity=restaurant),
+// which is what we need for "italian" → all italian restaurants in the
+// city. Free, polite rate limits. Longer TTL because city cuisine sets
+// change slowly.
+const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+const overpassCache = new Map<string, { at: number; value: unknown }>();
+const OVERPASS_TTL_MS = 60 * 60 * 1000; // 1h
+
+type OverpassElement = {
+  type: "node" | "way" | "relation";
+  id: number;
+  lat?: number;
+  lon?: number;
+  center?: { lat: number; lon: number };
+  tags?: Record<string, string>;
+};
+
+async function overpass(query: string): Promise<OverpassElement[]> {
+  const cached = overpassCache.get(query);
+  if (cached && Date.now() - cached.at < OVERPASS_TTL_MS) return cached.value as OverpassElement[];
+  const res = await fetch(OVERPASS_URL, {
+    method: "POST",
+    headers: { "User-Agent": NOMINATIM_UA, "Content-Type": "application/x-www-form-urlencoded" },
+    body: `data=${encodeURIComponent(query)}`,
+  });
+  if (!res.ok) throw new Error(`Overpass ${res.status}: ${await res.text().catch(() => "")}`);
+  const json = (await res.json()) as { elements: OverpassElement[] };
+  const elements = json.elements ?? [];
+  overpassCache.set(query, { at: Date.now(), value: elements });
+  return elements;
+}
+
+// City bounding box lookup (S, W, N, E). Cached for the process lifetime.
+const cityBboxCache = new Map<string, [number, number, number, number]>();
+async function cityBbox(city: string): Promise<[number, number, number, number] | null> {
+  const key = city.trim().toLowerCase();
+  if (cityBboxCache.has(key)) return cityBboxCache.get(key)!;
+  try {
+    const hits = await nominatim<Array<NominatimHit & { boundingbox?: string[] }>>("/search", {
+      city, format: "json", limit: "1",
+    });
+    const bb = hits[0]?.boundingbox;
+    if (!bb || bb.length !== 4) return null;
+    // Nominatim returns [south, north, west, east] as strings.
+    const bbox: [number, number, number, number] = [
+      Number(bb[0]), Number(bb[2]), Number(bb[1]), Number(bb[3]),
+    ];
+    cityBboxCache.set(key, bbox);
+    return bbox;
+  } catch {
+    return null;
+  }
+}
+
+// Turn an Overpass element into the same Business shape we use everywhere else.
+const elementToBusiness = (el: OverpassElement) => {
+  const tags = el.tags ?? {};
+  const lat = el.lat ?? el.center?.lat ?? 0;
+  const lon = el.lon ?? el.center?.lon ?? 0;
+  const addr = [
+    [tags["addr:housenumber"], tags["addr:street"]].filter(Boolean).join(" "),
+    tags["addr:suburb"] ?? tags["addr:neighbourhood"] ?? null,
+    tags["addr:city"] ?? null,
+    tags["addr:state"] ?? null,
+  ].filter((p) => p && p.length > 0).join(", ");
+  return {
+    id: `osm:${el.type}:${el.id}`,
+    source: "osm" as const,
+    source_id: `${el.type}:${el.id}`,
+    name: tags.name ?? "(unnamed)",
+    address: addr.length > 0 ? addr : null,
+    city: tags["addr:city"] ?? null,
+    lat, lng: lon,
+    category: [tags.amenity, tags.cuisine].filter(Boolean).join(":") || null,
+  };
+};
+
+// Build an Overpass query for the given cuisines + amenities in a bbox.
+// Empty cuisines → just the amenity types (e.g. "restaurant" alone).
+const AMENITY_DEFAULTS = ["restaurant", "cafe", "fast_food", "bar", "pub"];
+function buildOverpassQuery(
+  bbox: [number, number, number, number],
+  cuisines: string[],
+  amenities: string[],
+): string {
+  const bboxStr = `${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]}`;
+  const amenityRegex = (amenities.length > 0 ? amenities : AMENITY_DEFAULTS).join("|");
+  const clauses: string[] = [];
+  if (cuisines.length > 0) {
+    // OSM cuisine tags can be semicolon-separated ("italian;pizza"), so use ~
+    // for a substring/regex match.
+    const cuisineRegex = cuisines.join("|");
+    for (const el of ["node", "way"]) {
+      clauses.push(`${el}[amenity~"${amenityRegex}"][cuisine~"${cuisineRegex}",i](${bboxStr});`);
+    }
+  } else {
+    for (const el of ["node", "way"]) {
+      clauses.push(`${el}[amenity~"${amenityRegex}"](${bboxStr});`);
+    }
+  }
+  return `[out:json][timeout:20];(${clauses.join("")});out center 60;`;
+}
+
 type NominatimHit = {
   place_id: number;
   osm_type?: string;
@@ -250,6 +354,8 @@ type ClassifierResult = {
   named_query?: string;      // canonical business name if intent=named or ambiguous
   craving_query?: string;    // craving keyword phrase if intent=craving or ambiguous
   poi_terms?: string[];      // place-database search phrases for craving (chain names, synonyms, categories)
+  cuisines?: string[];       // OSM cuisine tag values (e.g. ["italian","pizza"])
+  amenities?: string[];      // OSM amenity types (e.g. ["restaurant","fast_food"])
   reason?: string;
 };
 
@@ -266,16 +372,18 @@ async function classifyIntent(q: string, city: string | null): Promise<Classifie
   const system =
     'You classify short search queries typed into a local-food-review app.\n' +
     'Given the query and the user\'s current city, return strict JSON:\n' +
-    '{"intent":"named"|"craving"|"ambiguous","named_query":"...","craving_query":"...","poi_terms":["...","..."],"reason":"..."}\n\n' +
+    '{"intent":"named"|"craving"|"ambiguous","named_query":"...","craving_query":"...","poi_terms":["...","..."],"cuisines":["..."],"amenities":["..."],"reason":"..."}\n\n' +
     '- "named": the query is a distinctive brand or business name, even if it contains a category word. Examples: "Discourse Coffee", "Din Tai Fung", "Cousins Subs", "Shake Shack", "Blue Bottle Coffee", "Jimmy John\'s", "In-N-Out Burger". If the two-or-more-word combination together forms a recognizable brand, choose "named" — do NOT mark it ambiguous just because one word is a category noun.\n' +
     '- "craving": the query is a bare cuisine, dish, mood, or descriptor with no proper-noun brand token. Examples: "great tacos", "hangover food", "cozy date night", "subs", "pho", "coffee".\n' +
-    '- "ambiguous": use ONLY when the query is a single ambiguous word/phrase that is BOTH a well-known brand AND a bare category noun with no additional qualifier. Examples: "shake shack" (both a chain and "a shack that shakes"? probably still named), "subway" (chain vs a train subway — usually named). Reserve this bucket sparingly. If in doubt, choose "named" over "ambiguous".\n\n' +
-    'poi_terms: for craving/ambiguous intents, return 4-8 short phrases the OpenStreetMap place database (Nominatim) would understand as literal name substrings. Include the craving noun, common chain names, and cuisine synonyms. Examples:\n' +
-    '  "subs" → ["subs","subway","sandwich shop","jimmy johns","jersey mikes","cousins subs","potbelly","milios"]\n' +
-    '  "tacos" → ["taco","taco bell","chipotle","taqueria","mexican restaurant"]\n' +
-    '  "coffee" → ["coffee","cafe","starbucks","dunkin","peets","blue bottle","stumptown"]\n' +
-    '  "burgers" → ["burger","five guys","shake shack","in-n-out","mcdonalds","culvers","smashburger"]\n' +
-    'Pick brand names appropriate to the region if you can (regional chains > national). Keep terms short (1-3 words each).\n\n' +
+    '- "ambiguous": use ONLY when the query is a single ambiguous word/phrase that is BOTH a well-known brand AND a bare category noun with no additional qualifier. Reserve this bucket sparingly. If in doubt, choose "named" over "ambiguous".\n\n' +
+    'For craving/ambiguous intents, populate cuisines[] and amenities[] using OpenStreetMap tag values (these become an Overpass query against real OSM cuisine/amenity tags):\n' +
+    '  cuisines: OSM cuisine values — pick from italian, pizza, chinese, sushi, japanese, mexican, taco, thai, indian, vietnamese, pho, korean, mediterranean, greek, turkish, lebanese, ramen, noodle, burger, sandwich, seafood, bbq, breakfast, brunch, american, french, ethiopian, spanish, tapas, steak, vegetarian, vegan, coffee_shop, ice_cream, chicken, pub_food, wine_bar. Include synonyms — "subs" → ["sandwich"], "italian" → ["italian","pizza"], "tacos" → ["mexican","taco"].\n' +
+    '  amenities: OSM amenity values — pick from restaurant, cafe, fast_food, bar, pub, ice_cream, biergarten. Default to ["restaurant","cafe","fast_food","bar","pub"] if the query doesn\'t narrow it. Coffee → ["cafe"]. Bars → ["bar","pub"]. Fast food/subs → ["fast_food","restaurant"].\n\n' +
+    'poi_terms: for craving/ambiguous, also return 4-8 short phrases for a name-based place lookup (chain names + cuisine words) — this catches spots not tagged with cuisine. Examples:\n' +
+    '  "subs" → ["subs","subway","sandwich shop","jimmy johns","jersey mikes","cousins subs","potbelly"]\n' +
+    '  "tacos" → ["taco","taco bell","chipotle","taqueria"]\n' +
+    '  "italian" → ["italian","pizza","ristorante","trattoria","pizzeria"]\n' +
+    'Prefer regional chains where you can. Keep terms short (1-3 words).\n\n' +
     'Always include named_query and craving_query when intent is "ambiguous". ' +
     'Return only the JSON, no prose. If the query is a single common food/drink noun, prefer "craving".';
   const user = `city: ${city ?? "(unknown)"}\nquery: ${q}`;
@@ -763,22 +871,36 @@ app.post("/api/search", async (c) => {
   }
 
   if (cls.intent === "craving") {
-    const craving = findCraving();
-    if (craving.length > 0) {
-      return c.json({ intent: "craving", classifier: cls, craving: { businesses: craving } });
-    }
-    // Empty-fallback: expand the craving into several place-search phrases
-    // (chain names, synonyms, category words) and query Nominatim for each
-    // in parallel, merging deduped hits. A single word like "subs" only
-    // matches names containing "subs" — "subway" and "jimmy johns" need
-    // their own queries.
+    // Craving searches now union three sources for the broadest coverage:
+    //   1. FTS5 hits — reviewed spots whose tag text matches the craving.
+    //   2. Overpass cuisine query — real OSM cuisine=X tagged restaurants
+    //      in the city bbox. Free, curated, cuisine-accurate.
+    //   3. Nominatim name-based expansion — chain names + synonyms from
+    //      the LLM (catches spots not tagged with cuisine, e.g. Cousins Subs).
+    // All three are merged, deduped by business_id, sorted (reviewed
+    // first), capped at 30 pins.
+    const ftsHits = findCraving();
+    const bbox = cityStr ? await cityBbox(cityStr) : null;
+    const cuisines = (cls.cuisines ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const amenities = (cls.amenities ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean);
     const terms = Array.from(new Set(
-      (cls.poi_terms ?? [cravingQ])
-        .map((t) => t.trim())
-        .filter((t) => t.length > 0)
+      (cls.poi_terms ?? [cravingQ]).map((t) => t.trim()).filter((t) => t.length > 0),
     )).slice(0, 8);
 
-    const dedup = new Map<string, NominatimHit>();
+    // Overpass: real cuisine tags in the city bbox.
+    let overpassBusinesses: ReturnType<typeof elementToBusiness>[] = [];
+    if (bbox && (cuisines.length > 0 || amenities.length > 0)) {
+      try {
+        const query = buildOverpassQuery(bbox, cuisines, amenities);
+        const elements = await overpass(query);
+        overpassBusinesses = elements
+          .map(elementToBusiness)
+          .filter((b) => b.name !== "(unnamed)" && b.lat !== 0 && b.lng !== 0);
+      } catch (err) { console.warn("overpass failed:", err); }
+    }
+
+    // Nominatim: name-based expansion for chains + generic terms.
+    const nominatimDedup = new Map<string, NominatimHit>();
     await Promise.all(terms.map(async (term) => {
       try {
         const hits = await nominatim<NominatimHit[]>("/search", {
@@ -787,31 +909,45 @@ app.post("/api/search", async (c) => {
         });
         for (const h of hits) {
           const id = businessIdFor(h);
-          if (!dedup.has(id)) dedup.set(id, h);
+          if (!nominatimDedup.has(id)) nominatimDedup.set(id, h);
         }
       } catch { /* per-term nominatim failure is non-fatal */ }
     }));
+    const nominatimBusinesses = Array.from(nominatimDedup.values()).map((h) => ({
+      id: businessIdFor(h),
+      source: "osm" as const,
+      source_id: h.osm_type && h.osm_id != null ? `${h.osm_type}:${h.osm_id}` : `place:${h.place_id}`,
+      name: h.display_name.split(",")[0]!.trim(),
+      address: shortAddress(h.address),
+      city: cityOf(h.address),
+      lat: Number(h.lat),
+      lng: Number(h.lon),
+      category: [h.class, h.type].filter(Boolean).join(":") || null,
+    }));
 
-    const pois = Array.from(dedup.values()).slice(0, 30).map((h) => {
-      const base = {
-        id: businessIdFor(h),
-        source: "osm" as const,
-        source_id: h.osm_type && h.osm_id != null ? `${h.osm_type}:${h.osm_id}` : `place:${h.place_id}`,
-        name: h.display_name.split(",")[0]!.trim(),
-        address: shortAddress(h.address),
-        city: cityOf(h.address),
-        lat: Number(h.lat),
-        lng: Number(h.lon),
-        category: [h.class, h.type].filter(Boolean).join(":") || null,
-      };
-      return { ...base, ...reviewStatsFor(base.id) };
-    });
+    // Merge all three sources, dedupe by business id, enrich with review
+    // stats, sort reviewed spots first, cap at 30.
+    const dedup = new Map<string, { id: string; source: string; source_id: string; name: string; address: string | null; city: string | null; lat: number; lng: number; category: string | null }>();
+    // FTS5 hits go in first — they're the strongest signal (a real reviewer said this place matches).
+    for (const b of ftsHits) if (!dedup.has(b.id)) dedup.set(b.id, b);
+    for (const b of overpassBusinesses) if (!dedup.has(b.id)) dedup.set(b.id, b);
+    for (const b of nominatimBusinesses) if (!dedup.has(b.id)) dedup.set(b.id, b);
+
+    const enriched = Array.from(dedup.values()).map((b) => ({ ...b, ...reviewStatsFor(b.id) }));
+    enriched.sort((a, z) => (z.review_count ?? 0) - (a.review_count ?? 0));
+    const businesses = enriched.slice(0, 30);
 
     return c.json({
       intent: "craving",
       classifier: cls,
-      craving: { businesses: [] },
-      fallback: { pois, terms_used: terms },
+      craving: {
+        businesses,
+        sources: {
+          fts5: ftsHits.length,
+          overpass: overpassBusinesses.length,
+          nominatim: nominatimBusinesses.length,
+        },
+      },
     });
   }
 
