@@ -5,7 +5,10 @@ import "maplibre-gl/dist/maplibre-gl.css";
 // Explicitly emit MapLibre's Web Worker as a static asset. Without this,
 // the default worker URL resolves to a file Vite doesn't ship, and the
 // production build 404s on /assets/maplibre-gl-worker.mjs on GH Pages.
-import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
+// ?worker&url bundles the worker AND its imports (like maplibre-gl-shared.mjs)
+// into one file and gives us a URL to it. Plain ?url ships the raw file
+// but skips the dependency graph, so the worker 404s at runtime.
+import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 setWorkerUrl(maplibreWorkerUrl);
 import PinModal from "./components/PinModal.vue";
 import LoginModal from "./components/LoginModal.vue";
