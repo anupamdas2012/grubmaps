@@ -76,8 +76,7 @@ watch(() => props.prefillQuery, (v) => {
 <template>
   <div class="modal-backdrop" @click.self="emit('cancel')" @keydown="onKey">
     <div class="menu-card menu-card--modal picker-card">
-      <div class="menu-card-eyebrow">what are you reviewing?</div>
-      <h2 class="menu-card-title">Find the spot</h2>
+      <h2 class="menu-card-title">Pick your spot</h2>
       <div class="menu-card-rule"></div>
 
       <div class="picker-search-wrap">

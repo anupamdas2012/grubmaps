@@ -97,13 +97,18 @@ const SEED_INTERESTS: { id: string; name: string; emoji: string; color: string }
   { id: "wine",       name: "Wine",       emoji: "🍷", color: "#7f1d1d" },
   { id: "cigars",     name: "Cigars",     emoji: "🚬", color: "#4a3524" },
   { id: "sweets",     name: "Sweets",     emoji: "🍰", color: "#f472b6" },
-  { id: "culture",    name: "Culture",    emoji: "🎨", color: "#7c3aed" },
-  { id: "music",      name: "Music",      emoji: "🎵", color: "#2563eb" },
 ];
 const seedStmt = db.prepare(
   "INSERT OR REPLACE INTO interests (id, name, emoji, color, sort_order) VALUES (?, ?, ?, ?, ?)",
 );
 SEED_INTERESTS.forEach((i, idx) => seedStmt.run(i.id, i.name, i.emoji, i.color, idx));
+// Prune any interest ids that used to exist but are no longer seeded
+// (e.g. removed "culture"/"music"). Reviews FK'd to a missing interest
+// would be an issue, but pruning is safe on a dev DB with sim data —
+// the sim only uses interests from CRAVING_TO_INTEREST which excludes
+// these anyway.
+const KEEP_IDS = SEED_INTERESTS.map((i) => `'${i.id}'`).join(",");
+db.exec(`DELETE FROM interests WHERE id NOT IN (${KEEP_IDS});`);
 
 // ---- utility -----------------------------------------------------------
 const IP_SALT = process.env.IP_SALT ?? "grubmaps-dev-salt";

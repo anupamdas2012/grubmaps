@@ -35,7 +35,7 @@ const clear = () => {
       <input
         type="text"
         class="search-input"
-        placeholder="what are you craving? or find a spot by name…"
+        placeholder="craving something?"
         v-model="query"
         @keydown.enter.prevent="submit"
         autocomplete="off"

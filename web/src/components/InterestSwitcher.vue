@@ -5,13 +5,10 @@ import type { Interest } from "../types";
 const props = defineProps<{
   interests: Interest[];
   active: string;
-  mine: boolean;
-  userName: string;
 }>();
 
 const emit = defineEmits<{
   "update:active": [id: string];
-  "update:mine": [value: boolean];
 }>();
 
 // If an icon PNG fails to load we fall back to the Unicode emoji.
@@ -45,15 +42,6 @@ const onImgError = (id: string) => { imgFailed.value[id] = true; };
         <span v-else class="ilink-emoji">{{ i.emoji }}</span>
       </span>
       <span class="ilink-name">{{ i.name }}</span>
-    </button>
-    <button
-      type="button"
-      class="ilink ilink--mine"
-      :class="{ active: props.mine }"
-      @click="emit('update:mine', !props.mine)"
-      :title="props.mine ? 'Showing only your pins' : 'Showing everyone\'s pins'"
-    >
-      <span class="ilink-name">{{ props.mine ? "my tour" : "everyone" }}</span>
     </button>
   </nav>
 </template>

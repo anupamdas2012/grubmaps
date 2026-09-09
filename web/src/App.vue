@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, computed } from "vue";
-import { Map as MLMap, Marker, NavigationControl, type ExpressionSpecification } from "maplibre-gl";
+import { Map as MLMap, Marker, NavigationControl, AttributionControl, type ExpressionSpecification } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import PinModal from "./components/PinModal.vue";
 import LoginModal from "./components/LoginModal.vue";
@@ -8,6 +8,7 @@ import Logo from "./components/Logo.vue";
 import SearchBar from "./components/SearchBar.vue";
 import InterestSwitcher from "./components/InterestSwitcher.vue";
 import Fab from "./components/Fab.vue";
+import AudienceToggle from "./components/AudienceToggle.vue";
 import BusinessPicker from "./components/BusinessPicker.vue";
 import DetailSheet from "./components/DetailSheet.vue";
 import DisambigModal from "./components/DisambigModal.vue";
@@ -107,9 +108,18 @@ const renderBusinessMarker = (pin: BusinessPin) => {
     accent = interestColor(latest.interest_id);
   }
 
+  // Hot signal — businesses with lots of reviews and/or Good-calls get
+  // larger, more prominent text so the map immediately shows the
+  // crowd's favorites. Combines review count (breadth) with legit
+  // count on the latest review (depth).
+  const legitOnLatest = reviews[0]?.legit ?? 0;
+  const hotScore = reviews.length + legitOnLatest / 2;
+  const hotTier: "" | " hot" | " superhot" =
+    hotScore >= 10 ? " superhot" : hotScore >= 5 ? " hot" : "";
+
   const emojiOuter = document.createElement("div");
   const emojiInner = document.createElement("div");
-  emojiInner.className = `pin-emoji ${cls}`;
+  emojiInner.className = `pin-emoji ${cls}${hotTier}`;
   emojiInner.textContent = icon;
   if (cls === "yum") emojiInner.style.animationDelay = `${seededYumDelay(seed).toFixed(2)}s`;
   emojiOuter.appendChild(emojiInner);
@@ -125,7 +135,7 @@ const renderBusinessMarker = (pin: BusinessPin) => {
   const textRot = document.createElement("div");
   textRot.style.transform = `rotate(${seededRotation(seed).toFixed(2)}deg)`;
   const textInner = document.createElement("div");
-  textInner.className = `pin-text ${cls}`;
+  textInner.className = `pin-text ${cls}${hotTier}`;
   textInner.textContent = tag;
   textInner.style.setProperty("--pin-accent", accent);
   if (cls === "yum") textInner.style.animationDelay = `${seededYumDelay(seed).toFixed(2)}s`;
@@ -563,14 +573,16 @@ onMounted(async () => {
     style: "https://tiles.openfreemap.org/styles/positron",
     center: MILWAUKEE,
     zoom: 12,
+    attributionControl: false,               // we add our own below, positioned bottom-left
   });
+  map.addControl(new AttributionControl({ compact: true }), "bottom-left");
   map.on("load", () => {
     if (!map) return;
     applyStyleCleanup();
     void loadReviews();
     void detectCity();
   });
-  map.addControl(new NavigationControl({ showCompass: false }), "bottom-right");
+  map.addControl(new NavigationControl({ showCompass: false }), "top-right");
   const canvas = map.getCanvas();
   canvas.style.cursor = "grab";
   // Map is browse-only. No click handler on the canvas.
@@ -595,7 +607,7 @@ onBeforeUnmount(() => {
 
 <template>
   <header class="topbar">
-    <Logo />
+    <Logo class="logo--topbar" />
     <SearchBar
       :city="city"
       :loading="searching"
@@ -608,16 +620,15 @@ onBeforeUnmount(() => {
     v-if="interests.length > 0 && user"
     :interests="interests"
     :active="activeInterest"
-    :mine="mineOnly"
-    :user-name="user.displayName"
     @update:active="activeInterest = $event"
-    @update:mine="mineOnly = $event"
   />
   <div v-if="searchStatus" class="hint">
     {{ searchStatus }}
   </div>
   <div class="map-frame">
     <div ref="mapEl" class="map"></div>
+    <Logo class="logo--map-overlay" />
+    <AudienceToggle v-if="user" :mine="mineOnly" @update:mine="mineOnly = $event" />
     <Fab v-if="user" @click="onFab" />
   </div>
 
