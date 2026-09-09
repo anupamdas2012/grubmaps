@@ -1197,6 +1197,49 @@ html, body, #app {
   color: var(--menu-ink);
   line-height: 1.35;
 }
+.sheet-review-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+/* "Good call" reaction — the credibility primitive. Marking someone's
+ * recommendation as a good call validates both the recommendation and
+ * the reviewer's taste. Filled-red when the current user has marked it. */
+.good-call {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1.5px solid var(--menu-ink);
+  background: transparent;
+  border-radius: 999px;
+  font-family: var(--font-heading);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--menu-ink);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.12s, color 0.12s, border-color 0.12s, transform 0.08s;
+}
+.good-call:hover  { background: rgba(0, 0, 0, 0.05); }
+.good-call:active { transform: translateY(1px); }
+.good-call.marked {
+  background: var(--menu-accent);
+  border-color: var(--menu-accent);
+  color: #fff;
+  box-shadow: 0 3px 10px rgba(225, 29, 72, 0.28);
+}
+.good-call-icon  { font-size: 14px; line-height: 1; }
+.good-call-label { line-height: 1; }
+.good-call-count {
+  font-variant-numeric: tabular-nums;
+  padding-left: 4px;
+  border-left: 1px solid currentColor;
+  opacity: 0.75;
+}
 
 .sheet-empty-hint {
   padding: 24px 0;

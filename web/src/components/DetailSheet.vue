@@ -26,6 +26,24 @@ const notInDb = ref(false);
 const error = ref<string | null>(null);
 let abort: AbortController | null = null;
 
+// Local record of which reviews the current browser has "Good called".
+// Same pattern the old reaction fan used — server tracks by ip_hash, we
+// remember the click locally so the button stays filled on reload.
+const MY_KEY = "crave.myGoodCalls.v1";
+const myGoodCalls = ref<Set<number>>(new Set());
+const loadMyGoodCalls = () => {
+  try {
+    const raw = localStorage.getItem(MY_KEY);
+    if (!raw) return;
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) myGoodCalls.value = new Set(arr.filter((n) => typeof n === "number"));
+  } catch { /* ignore */ }
+};
+const saveMyGoodCalls = () => {
+  try { localStorage.setItem(MY_KEY, JSON.stringify([...myGoodCalls.value])); } catch { /* ignore */ }
+};
+loadMyGoodCalls();
+
 // Sheet header renders from props.business immediately; the fetch below
 // only fills in the reviews list. A 404 just means "no reviews yet" —
 // still show the header + "Be the first to review" CTA.
@@ -64,6 +82,40 @@ const onKey = (e: KeyboardEvent) => {
 };
 
 const writeReview = () => emit("write-review", props.business);
+
+// Optimistic toggle of the "Good call" (legit) reaction on a review.
+// Server is the source of truth for the count; we snap-back on failure.
+const toggleGoodCall = async (review: Review) => {
+  const marked = myGoodCalls.value.has(review.id);
+  const snapshot = review.legit;
+  if (marked) {
+    myGoodCalls.value.delete(review.id);
+    review.legit = Math.max(0, review.legit - 1);
+  } else {
+    myGoodCalls.value.add(review.id);
+    review.legit++;
+  }
+  saveMyGoodCalls();
+  try {
+    const res = await fetch(`/api/reviews/${review.id}/reactions`, {
+      method: marked ? "DELETE" : "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "legit" }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = (await res.json()) as { reactions: { legit: number; dispute: number; protip: number } };
+    review.legit = data.reactions.legit;
+    review.dispute = data.reactions.dispute;
+    review.protip = data.reactions.protip;
+  } catch (err) {
+    // Snap back on failure.
+    if (marked) myGoodCalls.value.add(review.id);
+    else myGoodCalls.value.delete(review.id);
+    review.legit = snapshot;
+    saveMyGoodCalls();
+    console.error("Good-call toggle failed", err);
+  }
+};
 
 const ctaLabel = computed(() =>
   reviews.value.length === 0 ? "Be the first to review" : "Write another review",
@@ -108,6 +160,21 @@ const reviewsHeading = computed(() =>
                 <span class="sheet-review-author">{{ r.display_name }}</span>
               </div>
               <div class="sheet-review-tag">"{{ r.tag }}"</div>
+              <div class="sheet-review-actions">
+                <button
+                  type="button"
+                  class="good-call"
+                  :class="{ marked: myGoodCalls.has(r.id) }"
+                  :aria-pressed="myGoodCalls.has(r.id)"
+                  @click="toggleGoodCall(r)"
+                >
+                  <span class="good-call-icon" aria-hidden="true">👍</span>
+                  <span class="good-call-label">
+                    {{ myGoodCalls.has(r.id) ? "Good call" : "Good call?" }}
+                  </span>
+                  <span v-if="r.legit > 0" class="good-call-count">{{ r.legit }}</span>
+                </button>
+              </div>
             </li>
           </ul>
           <p v-else-if="!loading" class="sheet-empty-hint">
