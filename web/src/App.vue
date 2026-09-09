@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, computed } from "vue";
-import { Map as MLMap, Marker, NavigationControl, AttributionControl, type ExpressionSpecification } from "maplibre-gl";
+import { Map as MLMap, Marker, NavigationControl, AttributionControl, setWorkerUrl, type ExpressionSpecification } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+// Explicitly emit MapLibre's Web Worker as a static asset. Without this,
+// the default worker URL resolves to a file Vite doesn't ship, and the
+// production build 404s on /assets/maplibre-gl-worker.mjs on GH Pages.
+import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
+setWorkerUrl(maplibreWorkerUrl);
 import PinModal from "./components/PinModal.vue";
 import LoginModal from "./components/LoginModal.vue";
 import Logo from "./components/Logo.vue";
