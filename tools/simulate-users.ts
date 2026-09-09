@@ -244,58 +244,112 @@ for (const t of TRIBES) {
   console.log(`  ${t.padEnd(9)}: ${n}`);
 }
 
+// Hotness distribution — most reviews middling, some hot, some cold.
+// Used as a multiplier on the base Good-call probability so certain
+// reviews naturally accumulate many more Good-calls than others.
+function drawHotness(): number {
+  const r = Math.random();
+  if (r < 0.15) return 0.9 + Math.random() * 0.1;   // 15% hot (0.9-1.0)
+  if (r < 0.30) return Math.random() * 0.25;         // 15% cold (0-0.25)
+  return 0.35 + Math.random() * 0.5;                 // 70% middle (0.35-0.85)
+}
+
+async function postReview(
+  u: SimUser, business: Business, craving: string, verdict: Verdict,
+): Promise<PostedReview | null> {
+  const bank = TAGS[craving]?.[verdict] ?? [`something about ${craving}`];
+  const tag = rnd(bank);
+  const interest = CRAVING_TO_INTEREST[craving] ?? "food";
+  const hotness = drawHotness();
+  if (dryRun) {
+    return { id: -1, user: u, businessId: business.id, tag, interest, hotness };
+  }
+  await post("/api/businesses", business, { "x-forwarded-for": u.ip });
+  const res = await post(
+    "/api/reviews",
+    { business_id: business.id, interest_id: interest, verdict, tag },
+    { "x-user-id": u.id, "x-forwarded-for": u.ip },
+  );
+  if (!res.ok) return null;
+  const data = (await res.json()) as { id: number };
+  return { id: data.id, user: u, businessId: business.id, tag, interest, hotness };
+}
+
 // 3. Each user posts 4-8 reviews at businesses matching their tribe.
-type PostedReview = { id: number; user: SimUser; businessId: string; tag: string; interest: string };
+type PostedReview = { id: number; user: SimUser; businessId: string; tag: string; interest: string; hotness: number };
+type BusinessKnown = { business: Business; craving: string };
+const businessIndex = new Map<string, BusinessKnown>();
+for (const t of TRIBES) {
+  for (const { craving, businesses } of businessPool[t]) {
+    for (const b of businesses) if (!businessIndex.has(b.id)) businessIndex.set(b.id, { business: b, craving });
+  }
+}
+
 const postedReviews: PostedReview[] = [];
-console.log(`\nPosting reviews…`);
+console.log(`\nPosting initial reviews (4-8 per user, tribe-preferred spots)…`);
 for (const u of users) {
   const nReviews = 4 + Math.floor(Math.random() * 5); // 4-8
   const pool = businessPool[u.tribe];
   const targets: { craving: string; business: Business }[] = [];
-  for (let i = 0; i < nReviews && targets.length < nReviews; i++) {
+  for (let i = 0; i < nReviews * 3 && targets.length < nReviews; i++) {
     const bucket = rnd(pool);
     if (bucket.businesses.length === 0) continue;
     const business = rnd(bucket.businesses);
-    if (targets.find((t) => t.business.id === business.id)) continue; // no dup per user
+    if (targets.find((t) => t.business.id === business.id)) continue; // no dup per user in this pass
     targets.push({ craving: bucket.craving, business });
   }
+  let posted = 0;
   for (const { craving, business } of targets) {
     const verdict = weightedVerdict(VERDICT_DIST[u.tribe]);
-    const bank = TAGS[craving]?.[verdict] ?? [`something about ${craving}`];
-    const tag = rnd(bank);
-    const interest = CRAVING_TO_INTEREST[craving] ?? "food";
-    if (dryRun) {
-      postedReviews.push({ id: -1, user: u, businessId: business.id, tag, interest });
-      continue;
-    }
-    // Upsert business first (Overpass results aren't yet in our DB).
-    await post("/api/businesses", business, { "x-forwarded-for": u.ip });
-    const res = await post(
-      "/api/reviews",
-      { business_id: business.id, interest_id: interest, verdict, tag },
-      { "x-user-id": u.id, "x-forwarded-for": u.ip },
-    );
-    if (!res.ok) {
-      console.log(`  ${u.name} → ${business.name}: FAIL ${res.status} ${await res.text().catch(() => "")}`);
-      continue;
-    }
-    const data = (await res.json()) as { id: number };
-    postedReviews.push({ id: data.id, user: u, businessId: business.id, tag, interest });
+    const r = await postReview(u, business, craving, verdict);
+    if (r) { postedReviews.push(r); posted++; }
+    if (!dryRun) await new Promise((rr) => setTimeout(rr, 40));
   }
-  process.stdout.write(`  ${u.name} (${u.tribe}) → ${targets.length} reviews\n`);
-  await new Promise((r) => setTimeout(r, 60));
+  process.stdout.write(`  ${u.name} (${u.tribe}) → ${posted} reviews\n`);
+}
+console.log(`\nInitial round: ${postedReviews.length} reviews`);
+
+// 3b. Hotspot pass — pick a handful of businesses and pile on many more
+// reviews from random users (dups allowed — someone can review a place
+// for tacos AND cocktails separately). This lets us feel busy spots
+// with 8-20 reviews stacked up.
+const HOTSPOT_COUNT = 6;
+const uniqueBusinessIds = Array.from(new Set(postedReviews.map((r) => r.businessId)));
+// Prefer businesses with a real cuisine bank so tags stay coherent.
+const hotspotCandidates = uniqueBusinessIds.filter((id) => {
+  const bk = businessIndex.get(id);
+  return bk && TAGS[bk.craving];
+});
+const hotspots = [...hotspotCandidates].sort(() => Math.random() - 0.5).slice(0, HOTSPOT_COUNT);
+console.log(`\nHotspot pass — piling on ${HOTSPOT_COUNT} popular spots…`);
+for (const bizId of hotspots) {
+  const bk = businessIndex.get(bizId)!;
+  const target = 8 + Math.floor(Math.random() * 13); // 8-20 more reviews
+  let added = 0;
+  for (let i = 0; i < target; i++) {
+    const u = rnd(users);
+    const verdict = weightedVerdict(VERDICT_DIST[u.tribe]);
+    const r = await postReview(u, bk.business, bk.craving, verdict);
+    if (r) { postedReviews.push(r); added++; }
+    if (!dryRun) await new Promise((rr) => setTimeout(rr, 30));
+  }
+  console.log(`  ${bk.business.name.padEnd(30).slice(0, 30)} · +${added} reviews (${bk.craving})`);
 }
 console.log(`\nTotal reviews posted: ${postedReviews.length}`);
 
-// 4. Cross-Good-call other users' reviews with tribe affinity.
-console.log(`\nGood-calling reviews…`);
-const CROSS_TRIBE_P = 0.15;
-const SAME_TRIBE_P  = 0.65;
+// 4. Cross-Good-call other users' reviews. Probability blends tribe
+// affinity with per-review hotness so some reviews naturally become
+// crowd favorites and others sit quietly.
+console.log(`\nGood-calling reviews (weighted by hotness)…`);
+const CROSS_TRIBE_P = 0.10;
+const SAME_TRIBE_P  = 0.55;
 let goodCallCount = 0;
 for (const u of users) {
   for (const r of postedReviews) {
-    if (r.user.id === u.id) continue; // don't self-good-call
-    const p = r.user.tribe === u.tribe ? SAME_TRIBE_P : CROSS_TRIBE_P;
+    if (r.user.id === u.id) continue;
+    const base = r.user.tribe === u.tribe ? SAME_TRIBE_P : CROSS_TRIBE_P;
+    // Hotness multiplier: cold reviews (0.1) → 0.44× base; hot (1.0) → 1.7× base.
+    const p = Math.min(0.85, base * (0.3 + r.hotness * 1.4));
     if (Math.random() > p) continue;
     if (dryRun) { goodCallCount++; continue; }
     const res = await post(
@@ -307,5 +361,15 @@ for (const u of users) {
   }
 }
 console.log(`Total good-calls: ${goodCallCount}`);
+
+// 5. Quick distribution snapshot so we can see the shape.
+if (!dryRun) {
+  const byBiz = new Map<string, number>();
+  for (const r of postedReviews) byBiz.set(r.businessId, (byBiz.get(r.businessId) ?? 0) + 1);
+  const counts = [...byBiz.values()].sort((a, b) => b - a);
+  const top5 = counts.slice(0, 5);
+  console.log(`\nReviews per business (top 5): ${top5.join(", ")}`);
+  console.log(`Unique reviewed businesses: ${byBiz.size}`);
+}
 
 console.log(`\nDone. Try: open ${API.replace(":3001", ":5173")} and search "italian", "tacos", "cocktails"`);
