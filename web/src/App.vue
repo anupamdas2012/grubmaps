@@ -401,8 +401,12 @@ const onPickerPick = async (b: Business) => {
 };
 
 // ---- detail sheet flow -------------------------------------------------
+// The sheet needs a full Business object so it can render headers even
+// for spots not yet in our DB (fallback POIs). We look one up from the
+// pin cache, fall back to the passed-in business, and set both refs.
 const openDetail = (businessId: string, fallbackBusiness: Business | null) => {
-  detailFallback.value = fallbackBusiness;
+  const cached = businessPins.get(businessId)?.business;
+  detailFallback.value = cached ?? fallbackBusiness ?? null;
   detailBusinessId.value = businessId;
 };
 const closeDetail = () => {
@@ -422,6 +426,14 @@ const submitReview = async ({
   if (!pickerBusiness.value || !user.value) return;
   const business = pickerBusiness.value;
   try {
+    // Upsert the business first — it may be a fallback pin from Overpass
+    // or Nominatim that was never saved. POST /api/businesses is idempotent
+    // (409-safe), so this is always cheap and never hurts.
+    await fetch("/api/businesses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(business),
+    }).catch((err) => console.warn("business upsert failed (non-fatal)", err));
     const res = await authFetch(user.value, "/api/reviews", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -639,9 +651,8 @@ onBeforeUnmount(() => {
   />
 
   <DetailSheet
-    v-if="detailBusinessId"
-    :business-id="detailBusinessId"
-    :is-fallback="!!detailFallback"
+    v-if="detailBusinessId && detailFallback"
+    :business="detailFallback"
     @close="closeDetail"
     @write-review="onDetailWriteReview"
   />
