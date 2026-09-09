@@ -77,7 +77,7 @@ watch(() => props.prefillQuery, (v) => {
 <template>
   <div class="modal-backdrop" @click.self="emit('cancel')" @keydown="onKey">
     <div class="menu-card menu-card--modal picker-card">
-      <h2 class="menu-card-title">What's good where?</h2>
+      <h2 class="menu-card-title">What's good?</h2>
       <div class="menu-card-rule"></div>
 
       <div class="picker-search-wrap">
@@ -88,7 +88,7 @@ watch(() => props.prefillQuery, (v) => {
           @keydown.esc="emit('cancel')"
           type="text"
           class="menu-input"
-          :placeholder="props.city ? `search in ${props.city}…` : 'restaurant, cafe, bar…'"
+          placeholder="search a restaurant"
           autocomplete="off"
           spellcheck="false"
         />
