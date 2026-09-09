@@ -8,6 +8,7 @@
     "dev:web": "cd web && bun run dev",
     "gen:emojis": "bun run scripts/gen-emojis.ts",
     "icon": "bun run tools/make-icon.ts",
-    "icons:gen": "bun run tools/gen-icons.ts"
+    "icons:gen": "bun run tools/gen-icons.ts",
+    "sim": "bun run tools/simulate-users.ts"
   }
 }
